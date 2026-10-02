@@ -1,0 +1,6 @@
+# Exact upstream revisions used by the containerized Linux L4D2 x86 build.
+# Update these only when intentionally refreshing the build toolchain.
+HL2SDK_COMMIT=c2badaa4f7e763a92427ac11202c349385810cc2
+SOURCEMOD_COMMIT=2e229b111534b1be007dc3bd9acfcf2fc472e893
+MMSOURCE_COMMIT=75dd7b26fe92e535a11f0318ead73c3e05130d0b
+AMBUILD_COMMIT=01212cb57c96561f664b6dfb2ee10e66de6f81e4

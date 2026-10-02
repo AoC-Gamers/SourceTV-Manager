@@ -30,9 +30,10 @@
 */
 
 #include "extension.h"
-#include "forwards.h"
-#include "hltvserverwrapper.h"
-#include "commonhooks.h"
+#include "hooks/forwards.h"
+#include <climits>
+#include "core/hltvserverwrapper.h"
+#include "hooks/commonhooks.h"
 
 CForwardManager g_pSTVForwards;
 
@@ -77,6 +78,7 @@ SH_DECL_MANUALHOOK1(CHLTVServer_GetChallengeType, 0, 0, 0, int, const netadr_t &
 
 void CForwardManager::Init()
 {
+	plsys->AddPluginsListener(this);
 	int offset = -1;
 	if (!g_pGameConf->GetOffset("CHLTVServer::ConnectClient", &offset) || offset == -1)
 	{
@@ -134,6 +136,9 @@ void CForwardManager::Init()
 
 	m_StartRecordingFwd = forwards->CreateForward("SourceTV_OnStartRecording", ET_Ignore, 2, NULL, Param_Cell, Param_String);
 	m_StopRecordingFwd = forwards->CreateForward("SourceTV_OnStopRecording", ET_Ignore, 3, NULL, Param_Cell, Param_String, Param_Cell);
+	m_RecordingFileStartedFwd = forwards->CreateForward("SourceTV_OnRecordingFileStarted", ET_Ignore, 3, NULL, Param_Cell, Param_String, Param_Cell);
+	m_RecordingFileClosedFwd = forwards->CreateForward("SourceTV_OnRecordingFileClosed", ET_Ignore, 3, NULL, Param_Cell, Param_String, Param_Cell);
+	m_RecorderAvailabilityChangedFwd = forwards->CreateForward("SourceTV_OnRecorderAvailabilityChanged", ET_Ignore, 2, NULL, Param_Cell, Param_Cell);
 	m_SpectatorPreConnectFwd = forwards->CreateForward("SourceTV_OnSpectatorPreConnect", ET_LowEvent, 4, NULL, Param_String, Param_String, Param_String, Param_String);
 	m_SpectatorConnectedFwd = forwards->CreateForward("SourceTV_OnSpectatorConnected", ET_Ignore, 1, NULL, Param_Cell);
 	m_SpectatorDisconnectFwd = forwards->CreateForward("SourceTV_OnSpectatorDisconnect", ET_Ignore, 2, NULL, Param_Cell, Param_String);
@@ -148,8 +153,12 @@ void CForwardManager::Init()
 
 void CForwardManager::Shutdown()
 {
+	plsys->RemovePluginsListener(this);
 	forwards->ReleaseForward(m_StartRecordingFwd);
 	forwards->ReleaseForward(m_StopRecordingFwd);
+	forwards->ReleaseForward(m_RecordingFileStartedFwd);
+	forwards->ReleaseForward(m_RecordingFileClosedFwd);
+	forwards->ReleaseForward(m_RecorderAvailabilityChangedFwd);
 	forwards->ReleaseForward(m_SpectatorPreConnectFwd);
 	forwards->ReleaseForward(m_SpectatorConnectedFwd);
 	forwards->ReleaseForward(m_SpectatorDisconnectFwd);
@@ -162,19 +171,29 @@ void CForwardManager::Shutdown()
 	forwards->ReleaseForward(m_ServerShutdownFwd);
 }
 
+void CForwardManager::OnPluginUnloaded(IPlugin *plugin)
+{
+	if (plugin && m_RecordingOwner.plugin == plugin && m_RecordingOwner.pluginSerial == plugin->GetSerial())
+		m_RecordingOwner = { nullptr, 0, nullptr, 0 };
+}
+
 void CForwardManager::HookRecorder(IDemoRecorder *recorder)
 {
 #ifdef WIN32
+	SH_ADD_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Pre), false);
 	SH_ADD_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Post), true);
 	SH_ADD_HOOK(IDemoRecorder, StopRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStopRecording), false);
+	SH_ADD_HOOK(IDemoRecorder, StopRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStopRecording_Post), true);
 #endif
 }
 
 void CForwardManager::UnhookRecorder(IDemoRecorder *recorder)
 {
 #ifdef WIN32
+	SH_REMOVE_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Pre), false);
 	SH_REMOVE_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Post), true);
 	SH_REMOVE_HOOK(IDemoRecorder, StopRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStopRecording), false);
+	SH_REMOVE_HOOK(IDemoRecorder, StopRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStopRecording_Post), true);
 #endif
 }
 
@@ -268,6 +287,9 @@ void CForwardManager::CallOnServerShutdown(IHLTVServer *server)
 #if SOURCE_ENGINE == SE_CSGO
 static bool ExtractPlayerName(CUtlVector<NetMsg_SplitPlayerConnect *> &pSplitPlayerConnectVector, char *name, int maxlen)
 {
+	if (!name || maxlen <= 0)
+		return false;
+
 	for (int i = 0; i < pSplitPlayerConnectVector.Count(); i++)
 	{
 		NetMsg_SplitPlayerConnect *split = pSplitPlayerConnectVector[i];
@@ -283,7 +305,8 @@ static bool ExtractPlayerName(CUtlVector<NetMsg_SplitPlayerConnect *> &pSplitPla
 
 			if (!strcmp(cvar.name().c_str(), "name"))
 			{
-				strncpy(name, cvar.value().c_str(), maxlen);
+				// V_strncpy always terminates the destination when maxlen is positive.
+				V_strncpy(name, cvar.value().c_str(), maxlen);
 				return true;
 			}
 		}
@@ -304,7 +327,7 @@ IClient *CForwardManager::OnSpectatorConnect(const netadr_t & address, int nProt
 IClient *CForwardManager::OnSpectatorConnect(netadr_t & address, int nProtocol, int iChallenge, int iClientChallenge, int nAuthProtocol, const char *pchName, const char *pchPassword, const char *pCookie, int cbCookie)
 #endif
 {
-	if (!pCookie || (size_t)cbCookie < sizeof(uint64))
+	if (!pCookie || cbCookie < static_cast<int>(sizeof(uint64)))
 		RETURN_META_VALUE(MRES_IGNORED, nullptr);
 
 #if SOURCE_ENGINE == SE_CSGO
@@ -484,7 +507,8 @@ void CForwardManager::HandleSpectatorExecuteStringCommand(IClient *client, const
 	{
 		// TODO find correct hltvserver this client is connected to!
 
-		// Save the client index and message.
+		// The parsed argument belongs to this stack-local CCommand; the wrapper
+		// copies it so the later broadcast detour never keeps a borrowed pointer.
 		hltvserver->SetLastChatClient(client);
 		hltvserver->SetLastChatMessage(args[1]);
 	}
@@ -507,6 +531,14 @@ bool CForwardManager::OnSpectatorExecuteStringCommand_Post(const char *s)
 
 DETOUR_DECL_MEMBER2(DetourHLTVServer_BroadcastLocalChat, void, const char *, chat, const char *, chatgroup)
 {
+	// Check on every call so plugins loaded or unloaded at runtime are reflected
+	// without keeping a listener-count cache that could become stale.
+	if (!g_pSTVForwards.HasSpectatorChatListeners())
+	{
+		DETOUR_MEMBER_CALL(DetourHLTVServer_BroadcastLocalChat)(chat, chatgroup);
+		return;
+	}
+
 	static int hltvserver_inherit_offset = -1;
 	if (hltvserver_inherit_offset == -1)
 	{
@@ -626,11 +658,24 @@ void CForwardManager::CallOnSpectatorChatMessage_Post(HLTVServerWrapper *server,
 	m_SpectatorChatMessagePostFwd->Execute();
 }
 
+bool CForwardManager::HasSpectatorChatListeners()
+{
+	return m_SpectatorChatMessageFwd->GetFunctionCount() > 0 ||
+		m_SpectatorChatMessagePostFwd->GetFunctionCount() > 0;
+}
+
 // These two hooks are actually only hooked on windows.
 void CForwardManager::OnStartRecording_Post(const char *filename, bool bContinuously)
 {
 	IDemoRecorder *recorder = META_IFACEPTR(IDemoRecorder);
 	CallOnStartRecording(recorder, filename, bContinuously);
+	RETURN_META(MRES_IGNORED);
+}
+
+void CForwardManager::OnStartRecording_Pre(const char *filename, bool bContinuously)
+{
+	IDemoRecorder *recorder = META_IFACEPTR(IDemoRecorder);
+	CaptureRecordingStartState(recorder);
 	RETURN_META(MRES_IGNORED);
 }
 
@@ -645,26 +690,71 @@ void CForwardManager::OnStopRecording()
 	RETURN_META(MRES_IGNORED);
 }
 
+#if SOURCE_ENGINE == SE_CSGO
+void CForwardManager::OnStopRecording_Post(CGameInfo const *info)
+#else
+void CForwardManager::OnStopRecording_Post()
+#endif
+{
+	IDemoRecorder *recorder = META_IFACEPTR(IDemoRecorder);
+	CallOnRecordingFileClosed(recorder);
+	RETURN_META(MRES_IGNORED);
+}
+
 void CForwardManager::CallOnStartRecording(IDemoRecorder *recorder, const char *filename, bool bContinuously)
 {
-	if (m_StartRecordingFwd->GetFunctionCount() == 0)
-		return;
-
+	PendingRecordingStart previous = { false, "" };
+	auto previousStart = m_PendingRecordingStarts.find(recorder);
+	if (previousStart != m_PendingRecordingStarts.end())
+	{
+		previous = previousStart->second;
+		m_PendingRecordingStarts.erase(previousStart);
+	}
 	HLTVServerWrapper *wrapper = g_HLTVServers.GetWrapper(recorder);
 	int instance = -1;
+	std::string effectiveFilename = filename ? filename : "";
 	if (wrapper)
+	{
 		instance = wrapper->GetInstanceNumber();
+		const char *recorderFilename = wrapper->GetDemoFileName();
+		if (recorderFilename && recorderFilename[0] != '\0')
+			effectiveFilename = recorderFilename;
+	}
 
-	m_StartRecordingFwd->PushCell(instance);
-	m_StartRecordingFwd->PushString(filename);
-	m_StartRecordingFwd->Execute();
+	if (m_StartRecordingFwd->GetFunctionCount() > 0)
+	{
+		m_StartRecordingFwd->PushCell(instance);
+		m_StartRecordingFwd->PushString(effectiveFilename.c_str());
+		m_StartRecordingFwd->Execute();
+	}
+
+	bool newFile = !previous.wasRecording || stricmp(previous.filename.c_str(), effectiveFilename.c_str()) != 0;
+	if (newFile && recorder->IsRecording() && m_RecordingFileStartedFwd->GetFunctionCount() > 0)
+	{
+		m_RecordingFileStartedFwd->PushCell(instance);
+		m_RecordingFileStartedFwd->PushString(effectiveFilename.c_str());
+		m_RecordingFileStartedFwd->PushCell(bContinuously ? 1 : 0);
+		m_RecordingFileStartedFwd->Execute();
+	}
+}
+
+void CForwardManager::CaptureRecordingStartState(IDemoRecorder *recorder)
+{
+	if (!recorder)
+		return;
+	PendingRecordingStart state = { recorder->IsRecording(), "" };
+	if (state.wasRecording)
+	{
+		HLTVServerWrapper *wrapper = g_HLTVServers.GetWrapper(recorder);
+		const char *filename = wrapper ? wrapper->GetDemoFileName() : nullptr;
+		if (filename)
+			state.filename = filename;
+	}
+	m_PendingRecordingStarts[recorder] = state;
 }
 
 void CForwardManager::CallOnStopRecording(IDemoRecorder *recorder)
 {
-	if (m_StopRecordingFwd->GetFunctionCount() == 0)
-		return;
-
 	if (!recorder->IsRecording())
 		return;
 	
@@ -676,21 +766,101 @@ void CForwardManager::CallOnStopRecording(IDemoRecorder *recorder)
 		instance = wrapper->GetInstanceNumber();
 		pDemoFile = wrapper->GetDemoFileName();
 	}
+	PendingRecordingClose pending;
+	pending.instance = instance;
+	pending.tick = recorder->GetRecordingTick();
+	pending.filename = pDemoFile ? pDemoFile : "";
+	m_PendingRecordingCloses[recorder] = pending;
 
-	m_StopRecordingFwd->PushCell(instance);
-	m_StopRecordingFwd->PushString(pDemoFile);
-	m_StopRecordingFwd->PushCell(recorder->GetRecordingTick());
-	m_StopRecordingFwd->Execute();
+	if (m_StopRecordingFwd->GetFunctionCount() > 0)
+	{
+		m_StopRecordingFwd->PushCell(instance);
+		m_StopRecordingFwd->PushString(pending.filename.c_str());
+		m_StopRecordingFwd->PushCell(pending.tick);
+		m_StopRecordingFwd->Execute();
+	}
+}
+
+void CForwardManager::CallOnRecordingFileClosed(IDemoRecorder *recorder)
+{
+	auto found = m_PendingRecordingCloses.find(recorder);
+	if (found == m_PendingRecordingCloses.end())
+		return;
+
+	PendingRecordingClose pending = found->second;
+	m_PendingRecordingCloses.erase(found);
+	bool stillRecording = recorder->IsRecording();
+	HLTVServerWrapper *wrapper = g_HLTVServers.GetWrapper(recorder);
+	const char *currentFilename = stillRecording && wrapper ? wrapper->GetDemoFileName() : nullptr;
+	bool fileChanged = currentFilename && stricmp(pending.filename.c_str(), currentFilename) != 0;
+	if (stillRecording && !fileChanged)
+		return;
+	if (!stillRecording)
+		ClearRecordingOwner(recorder);
+	if (m_RecordingFileClosedFwd->GetFunctionCount() == 0)
+		return;
+
+	m_RecordingFileClosedFwd->PushCell(pending.instance);
+	m_RecordingFileClosedFwd->PushString(pending.filename.c_str());
+	m_RecordingFileClosedFwd->PushCell(pending.tick);
+	m_RecordingFileClosedFwd->Execute();
+}
+
+void CForwardManager::CallOnRecorderAvailabilityChanged(int instance, bool available)
+{
+	if (m_RecorderAvailabilityChangedFwd->GetFunctionCount() == 0)
+		return;
+	m_RecorderAvailabilityChangedFwd->PushCell(instance);
+	m_RecorderAvailabilityChangedFwd->PushCell(available ? 1 : 0);
+	m_RecorderAvailabilityChangedFwd->Execute();
+}
+
+cell_t CForwardManager::CreateRecordingOwner(IPlugin *plugin, IDemoRecorder *recorder)
+{
+	if (!plugin || !recorder || m_bRecordingOwnerTokensExhausted || m_RecordingOwner.token != 0)
+		return 0;
+	cell_t token = m_NextRecordingOwnerToken;
+	if (token <= 0)
+	{
+		m_bRecordingOwnerTokensExhausted = true;
+		return 0;
+	}
+	if (token == INT_MAX)
+		m_bRecordingOwnerTokensExhausted = true;
+	else
+		++m_NextRecordingOwnerToken;
+	m_RecordingOwner = { plugin, plugin->GetSerial(), recorder, token };
+	return token;
+}
+
+bool CForwardManager::IsRecordingOwner(IPlugin *plugin, IDemoRecorder *recorder, cell_t token)
+{
+	return plugin && recorder && token > 0 && m_RecordingOwner.token == token &&
+		m_RecordingOwner.plugin == plugin && m_RecordingOwner.pluginSerial == plugin->GetSerial() &&
+		m_RecordingOwner.recorder == recorder;
+}
+
+void CForwardManager::ClearRecordingOwner(IDemoRecorder *recorder)
+{
+	if (m_RecordingOwner.recorder == recorder)
+		m_RecordingOwner = { nullptr, 0, nullptr, 0 };
+	m_PendingRecordingCloses.erase(recorder);
+}
+
+cell_t CForwardManager::GetRecordingOwnerToken(IDemoRecorder *recorder)
+{
+	return recorder && m_RecordingOwner.recorder == recorder ? m_RecordingOwner.token : 0;
 }
 
 // Only need to detour these on Linux. Windows always uses the vtable.
 #ifndef WIN32
 DETOUR_DECL_MEMBER2(DetourHLTVStartRecording, void, const char *, filename, bool, bContinuously)
 {
+	IDemoRecorder *recorder = (IDemoRecorder *)this;
+	g_pSTVForwards.CaptureRecordingStartState(recorder);
 	// Call the original first.
 	DETOUR_MEMBER_CALL(DetourHLTVStartRecording)(filename, bContinuously);
 	
-	IDemoRecorder *recorder = (IDemoRecorder *)this;
 	g_pSTVForwards.CallOnStartRecording(recorder, filename, bContinuously);
 }
 
@@ -707,7 +877,8 @@ DETOUR_DECL_MEMBER0(DetourHLTVStopRecording, void)
 	DETOUR_MEMBER_CALL(DetourHLTVStopRecording)(info);
 #else
 	DETOUR_MEMBER_CALL(DetourHLTVStopRecording)();
-#endif	
+#endif
+	g_pSTVForwards.CallOnRecordingFileClosed(recorder);
 }
 
 void CForwardManager::CreateStartRecordingDetour()

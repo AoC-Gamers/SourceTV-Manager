@@ -36,6 +36,7 @@
 #include "amtl/am-utility.h"
 #include <vector>
 #include <memory>
+#include <string>
 
 class HLTVServerWrapper {
 public:
@@ -45,13 +46,14 @@ public:
 	IHLTVServer *GetHLTVServer();
 	IServer *GetBaseServer();
 	IDemoRecorder *GetDemoRecorder();
-	char *GetDemoFileName();
+	const char *GetDemoFileName();
 	HLTVClientWrapper *GetClient(int index);
+	HLTVClientWrapper *FindClient(int index) const;
 	int GetInstanceNumber();
 
 	IClient *GetLastChatClient();
 	void SetLastChatClient(IClient *client);
-	const char *GetLastChatMessage();
+	const char *GetLastChatMessage() const;
 	void SetLastChatMessage(const char *msg);
 
 	bool OnHLTVBotExecuteStringCommand(const char *s);
@@ -77,7 +79,9 @@ private:
 	std::vector<std::unique_ptr<HLTVClientWrapper>> m_Clients;
 
 	IClient *m_LastChatClient = nullptr;
-	const char *m_LastChatMessage = nullptr;
+	// Own the parsed chat text because CCommand's argument storage is temporary.
+	std::string m_LastChatMessage;
+	bool m_HasLastChatMessage = false;
 };
 
 class HLTVServerWrapperManager

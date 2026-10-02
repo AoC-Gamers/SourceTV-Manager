@@ -488,7 +488,7 @@ if os.path.exists(os.path.join(builder.sourcePath, 'safetyhook', 'AMBuilder')):
 
 # Add additional buildscripts here
 BuildScripts = [
-  'AMBuilder',
+  'extension/AMBuilder',
 ]
 
 if builder.backend == 'amb2':

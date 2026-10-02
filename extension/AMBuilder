@@ -6,12 +6,12 @@ projectName = 'sourcetvmanager'
 # smsdk_ext.cpp will be automatically added later
 sourceFiles = [
   'extension.cpp',
-  'commonhooks.cpp',
-  'natives.cpp',
-  'forwards.cpp',
-  'hltvserverwrapper.cpp',
-  'hltvdirectorwrapper.cpp',
-  'hltvclientwrapper.cpp',
+  'hooks/commonhooks.cpp',
+  'natives/natives.cpp',
+  'hooks/forwards.cpp',
+  'core/hltvserverwrapper.cpp',
+  'core/hltvdirectorwrapper.cpp',
+  'core/hltvclientwrapper.cpp',
 ]
 
 # SM 1.10+ compilation changes

@@ -19,7 +19,7 @@ enum SourceTVBroadcastTarget {
  * Get the current amount of running SourceTV instances.
  * Can usually only be 1 at max except for CSGO, which can have 2.
  *
- * @return SourceTV instance number count. 
+ * @return SourceTV instance number count.
  */
 native int SourceTV_GetServerInstanceCount();
 
@@ -97,7 +97,7 @@ native int SourceTV_GetBotIndex();
  * Get stats of the local SourceTV instance.
  * Returns only the stats of this server, don't include relays.
  *
- * You have to subtract the proxy count from the spectator count to 
+ * You have to subtract the proxy count from the spectator count to
  * get the real spectator count, because the proxies take one spectator slot
  * on the SourceTV server.
  *
@@ -113,7 +113,7 @@ native bool SourceTV_GetLocalStats(int &proxies, int &slots, int &specs);
  * Only the current Master Proxy can give accurate numbers.
  * Relay proxies only get updates from the master from time to time.
  *
- * You have to subtract the proxy count from the spectator count to 
+ * You have to subtract the proxy count from the spectator count to
  * get the real spectator count, because the proxies take one spectator slot
  * on the SourceTV server.
  *
@@ -234,10 +234,44 @@ native bool SourceTV_ForceChaseCameraShot(int iTarget1, int iTarget2, int distan
  */
 native bool SourceTV_StartRecording(const char[] sFilename);
 
+/** Result codes returned by SourceTV_StartRecordingEx(). */
+enum SourceTVRecordingStartResult
+{
+	SourceTVRecordingStart_Started = 0,               // Recording confirmed.
+	SourceTVRecordingStart_RecorderUnavailable,        // No wrapped recorder.
+	SourceTVRecordingStart_ServerInactive,             // SourceTV server inactive.
+	SourceTVRecordingStart_NotMaster,                  // Proxy is not master.
+	SourceTVRecordingStart_AlreadyRecording,           // Recorder already active.
+	SourceTVRecordingStart_InvalidPath,                // Invalid or too long.
+	SourceTVRecordingStart_StartFailed,                // Engine did not confirm path.
+	SourceTVRecordingStart_OwnerTokenUnavailable       // Token space or owner busy.
+};
+
 /**
- * Stops recording a SourceTV demo.
+ * Start recording and bind it to the calling plugin.
+ * `continuous` is passed to the engine. L4D2 segment rotation is not implied.
+ * A successful call returns a positive token. Tokens never repeat during the
+ * extension lifetime. Plugin unload revokes its token but leaves the demo
+ * recording; the legacy SourceTV_StopRecording() can stop an unowned demo.
+ */
+native SourceTVRecordingStartResult SourceTV_StartRecordingEx(const char[] filename, bool continuous, int &ownerToken);
+
+/** Stop only this plugin's active recording with its matching token. */
+native bool SourceTV_StopOwnedRecording(int ownerToken);
+
+/**
+ * Read one synchronous recorder snapshot. Return value means a recorder is
+ * available. When available, recording, instance, filename and tick describe
+ * that recorder at this call. ownerToken is exposed only to its owning plugin;
+ * other plugins receive 0. Unavailable outputs are false, 0, -1, empty, -1.
+ */
+native bool SourceTV_GetRecordingSnapshot(bool &recording, int &ownerToken, int &instance, char[] filename, int maxlen, int &tick);
+
+/**
+ * Stops recording a SourceTV demo. Refuses when another plugin owns it through
+ * SourceTV_StartRecordingEx(). A call through an engine command can bypass this.
  *
- * @return	True if recording stopped, false otherwise.
+ * @return True if the recorder stopped, false otherwise.
  */
 native bool SourceTV_StopRecording();
 
@@ -284,8 +318,11 @@ native bool SourceTV_PrintToDemoConsole(const char[] format, any ...);
  */
 forward void SourceTV_OnStartRecording(int instance, const char[] filename);
 
+/** Fired after the engine StartRecording call returns with IsRecording true. */
+forward void SourceTV_OnRecordingFileStarted(int instance, const char[] filename, bool continuous);
+
 /**
- * Called when a SourceTV demo stops being recorded.
+ * Called immediately before the engine closes a SourceTV demo.
  * @see SourceTV_SelectServerInstance
  *
  * @param instance	The SourceTV instance of server recording.
@@ -293,6 +330,22 @@ forward void SourceTV_OnStartRecording(int instance, const char[] filename);
  * @param recordingtick	The tick length of the demo.
  */
 forward void SourceTV_OnStopRecording(int instance, const char[] filename, int recordingtick);
+
+/**
+ * Fired after StopRecording returns. Filename and tick were copied before the
+ * engine closed its recorder-owned file object. Fires after the existing
+ * SourceTV_OnStopRecording pre-close forward. No event is emitted when the
+ * recorder remains active with the same filename. If it becomes inactive,
+ * ownership ends; future recordings are not assigned the old token, including
+ * after a map transition.
+ */
+forward void SourceTV_OnRecordingFileClosed(int instance, const char[] filename, int finalTick);
+
+/**
+ * Fired when a wrapped SourceTV recorder appears or disappears. A late-loaded
+ * listener must query SourceTV_GetRecordingSnapshot() for current state.
+ */
+forward void SourceTV_OnRecorderAvailabilityChanged(int instance, bool available);
 
 
 
@@ -376,7 +429,7 @@ native void SourceTV_GetClientPassword(int client, char[] password, int maxlen);
 
 /**
  * Kick a SourceTV spectator client.
- * 
+ *
  * @param client	The spectator client index.
  * @param sReason	The kick reason.
  * @error	Invalid client index or not connected.
@@ -385,7 +438,7 @@ native void SourceTV_KickClient(int client, const char[] sReason);
 
 /**
  * Print a message to a single client's chat.
- * 
+ *
  * @param client	The spectator client index.
  * @param format	The format string.
  * @param ...	Variable number of format string arguments.
@@ -395,7 +448,7 @@ native void SourceTV_PrintToChat(int client, const char[] format, any ...);
 
 /**
  * Print a message to a single client's console.
- * 
+ *
  * @param client	The spectator client index.
  * @param format	The format string.
  * @param ...	Variable number of format string arguments.
@@ -407,7 +460,7 @@ native void SourceTV_PrintToConsole(int client, const char[] format, any ...);
  * Change the stream title only for one spectator.
  * This is like tv_title but for a single client.
  * Gets overwritten when tv_title gets changed.
- * 
+ *
  * @param client	The spectator client index.
  * @param format	The format string.
  * @param ...	Variable number of format string arguments.
@@ -430,14 +483,14 @@ forward bool SourceTV_OnSpectatorPreConnect(const char[] name, char password[255
 
 /**
  * Called when a spectator client connected to the SourceTV server.
- * 
+ *
  * @param client	The spectator client index.
  */
 forward void SourceTV_OnSpectatorConnected(int client);
 
 /**
  * Called when a spectator client is about to disconnect.
- * 
+ *
  * @param client	The spectator client index.
  * @param reason	The reason for the disconnect. Can be overwritten.
  */
@@ -445,7 +498,7 @@ forward void SourceTV_OnSpectatorDisconnect(int client, char reason[255]);
 
 /**
  * Called after a spectator client disconnected.
- * 
+ *
  * @param client	The spectator client index.
  * @param reason	The reason for the disconnect.
  */
@@ -453,7 +506,7 @@ forward void SourceTV_OnSpectatorDisconnected(int client, const char reason[255]
 
 /**
  * Called when a spectator client is entering the game.
- * 
+ *
  * @param client	The spectator client index.
  */
 forward void SourceTV_OnSpectatorPutInServer(int client);
@@ -483,7 +536,7 @@ forward void SourceTV_OnSpectatorChatMessage_Post(int client, const char[] messa
 /**
  * Do not edit below this line!
  */
-public Extension __ext_stvmngr = 
+public Extension __ext_stvmngr =
 {
 	name = "SourceTV Manager",
 	file = "sourcetvmanager.ext",
@@ -522,6 +575,9 @@ public void __ext_stvmngr_SetNTVOptional()
 	MarkNativeAsOptional("SourceTV_ForceFixedCameraShot");
 	MarkNativeAsOptional("SourceTV_ForceChaseCameraShot");
 	MarkNativeAsOptional("SourceTV_StartRecording");
+	MarkNativeAsOptional("SourceTV_StartRecordingEx");
+	MarkNativeAsOptional("SourceTV_StopOwnedRecording");
+	MarkNativeAsOptional("SourceTV_GetRecordingSnapshot");
 	MarkNativeAsOptional("SourceTV_StopRecording");
 	MarkNativeAsOptional("SourceTV_IsRecording");
 	MarkNativeAsOptional("SourceTV_GetDemoFileName");

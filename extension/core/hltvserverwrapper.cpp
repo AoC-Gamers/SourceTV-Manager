@@ -1,6 +1,6 @@
-#include "hltvserverwrapper.h"
-#include "forwards.h"
-#include "commonhooks.h"
+#include "core/hltvserverwrapper.h"
+#include "hooks/forwards.h"
+#include "hooks/commonhooks.h"
 
 void *old_host_client = nullptr;
 bool g_HostClientOverridden = false;
@@ -45,9 +45,13 @@ void HLTVServerWrapper::Shutdown(bool bInformPlugins)
 
 	if (bInformPlugins)
 		g_pSTVForwards.CallOnServerShutdown(m_HLTVServer);
+	g_pSTVForwards.CallOnRecorderAvailabilityChanged(GetInstanceNumber(), false);
+	g_pSTVForwards.ClearRecordingOwner(m_DemoRecorder);
 
 	Unhook();
 
+	SetLastChatClient(nullptr);
+	SetLastChatMessage(nullptr);
 	m_HLTVServer = nullptr;
 	m_DemoRecorder = nullptr;
 	m_Connected = false;
@@ -68,15 +72,18 @@ IDemoRecorder *HLTVServerWrapper::GetDemoRecorder()
 	return m_DemoRecorder;
 }
 
-char *HLTVServerWrapper::GetDemoFileName()
+const char *HLTVServerWrapper::GetDemoFileName()
 {
 	if (!m_DemoRecorder)
 		return nullptr;
 
 #if SOURCE_ENGINE == SE_CSGO
-	return (char *)m_DemoRecorder + 8;
+	return reinterpret_cast<const char *>(m_DemoRecorder) + 8;
 #else
-	return (char *)m_DemoRecorder->GetDemoFile();
+	// In the L4D2 SDK, CDemoFile starts with m_szFileName[MAX_PATH]. GetDemoFile()
+	// returns that recorder-owned object, so its address is the filename buffer.
+	// The buffer belongs to the recorder; callers must copy it before teardown.
+	return reinterpret_cast<const char *>(m_DemoRecorder->GetDemoFile());
 #endif
 }
 
@@ -95,36 +102,63 @@ void HLTVServerWrapper::SetLastChatClient(IClient *client)
 	m_LastChatClient = client;
 }
 
-const char *HLTVServerWrapper::GetLastChatMessage()
+const char *HLTVServerWrapper::GetLastChatMessage() const
 {
-	return m_LastChatMessage;
+	return m_HasLastChatMessage ? m_LastChatMessage.c_str() : nullptr;
 }
 
 void HLTVServerWrapper::SetLastChatMessage(const char *msg)
 {
-	m_LastChatMessage = msg;
+	if (msg)
+	{
+		m_LastChatMessage = msg;
+		m_HasLastChatMessage = true;
+	}
+	else
+	{
+		m_LastChatMessage.clear();
+		m_HasLastChatMessage = false;
+	}
 }
 
 HLTVClientWrapper *HLTVServerWrapper::GetClient(int index)
 {
+	// The public API uses one-based client indexes; reject invalid values before
+	// converting to size_t or subtracting one for the vector position.
+	if (index <= 0)
+		return nullptr;
+
 	// Grow the vector with null pointers
 	// There might have been clients with lower indexes before we were loaded.
-	if (m_Clients.size() < (size_t)index)
+	const size_t clientCount = static_cast<size_t>(index);
+	const size_t clientSlot = clientCount - 1;
+	if (m_Clients.size() < clientCount)
 	{
-		int start = m_Clients.size();
-		m_Clients.resize(index);
-		for (int i = start; i < index; i++)
-		{
-			m_Clients[i] = nullptr;
-		}
+		// resize value-initializes the new unique_ptr entries to nullptr.
+		m_Clients.resize(clientCount);
 	}
 
-	if (!m_Clients[index - 1])
+	if (!m_Clients[clientSlot])
 	{
-		m_Clients[index - 1] = std::make_unique<HLTVClientWrapper>();
+		m_Clients[clientSlot] = std::make_unique<HLTVClientWrapper>();
 	}
 
-	return m_Clients[index - 1].get();
+	return m_Clients[clientSlot].get();
+}
+
+HLTVClientWrapper *HLTVServerWrapper::FindClient(int index) const
+{
+	// Native queries must not allocate wrappers for empty slots. Connected
+	// clients already have wrappers from HookServer (including late load) or
+	// OnSpectatorConnect before SourceTV_OnSpectatorConnected is fired.
+	if (index <= 0)
+		return nullptr;
+
+	const size_t clientSlot = static_cast<size_t>(index - 1);
+	if (clientSlot >= m_Clients.size())
+		return nullptr;
+
+	return m_Clients[clientSlot].get();
 }
 
 void HLTVServerWrapper::Hook()
@@ -377,6 +411,8 @@ void HLTVServerWrapperManager::AddServer(IHLTVServer *hltvserver)
 #endif
 
 	m_HLTVServers.emplace_back(new HLTVServerWrapper(hltvserver));
+	HLTVServerWrapper *wrapper = m_HLTVServers.back().get();
+	g_pSTVForwards.CallOnRecorderAvailabilityChanged(wrapper->GetInstanceNumber(), wrapper->GetDemoRecorder() != nullptr);
 }
 
 void HLTVServerWrapperManager::RemoveServer(IHLTVServer *hltvserver, bool bInformPlugins)

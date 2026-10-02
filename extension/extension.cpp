@@ -30,9 +30,9 @@
  */
 
 #include "extension.h"
-#include "hltvserverwrapper.h"
-#include "forwards.h"
-#include "natives.h"
+#include "core/hltvserverwrapper.h"
+#include "hooks/forwards.h"
+#include "natives/natives.h"
 
 IHLTVDirector *hltvdirector = nullptr;
 void *host_client = nullptr;

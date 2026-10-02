@@ -1,0 +1,21 @@
+services:
+  builder:
+    image: sourcetvmanager-builder:local
+    build:
+      context: .
+      dockerfile: Dockerfile.build
+    working_dir: /workspace
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    network_mode: none
+    environment:
+      HOME: /tmp
+    volumes:
+      - .:/workspace:ro
+      - ./.build:/output
+    command:
+      - make
+      - build-linux
+      - package-linux
+      - DEPS_DIR=/opt/sm-deps
+      - BUILD_DIR=/output/linux-l4d2
+      - VENV_DIR=/opt/sm-deps/.venv

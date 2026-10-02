@@ -1,0 +1,40 @@
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN dpkg --add-architecture i386 \
+    && apt-get update \
+    && apt-get install --no-install-recommends -y \
+        ca-certificates \
+        git \
+        build-essential \
+        g++-multilib \
+        python3 \
+        python3-pip \
+        python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY build-deps.lock /tmp/build-deps.lock
+
+RUN set -eu; \
+    . /tmp/build-deps.lock; \
+    mkdir -p /opt/sm-deps; \
+    git clone --no-checkout https://github.com/alliedmodders/hl2sdk.git /opt/sm-deps/hl2sdk-l4d2; \
+    git -C /opt/sm-deps/hl2sdk-l4d2 fetch --depth 1 origin "$HL2SDK_COMMIT"; \
+    git -C /opt/sm-deps/hl2sdk-l4d2 checkout --detach "$HL2SDK_COMMIT"; \
+    git clone --no-checkout https://github.com/alliedmodders/sourcemod.git /opt/sm-deps/sourcemod-1.12; \
+    git -C /opt/sm-deps/sourcemod-1.12 fetch --depth 1 origin "$SOURCEMOD_COMMIT"; \
+    git -C /opt/sm-deps/sourcemod-1.12 checkout --detach "$SOURCEMOD_COMMIT"; \
+    git -C /opt/sm-deps/sourcemod-1.12 submodule update --init --recursive --depth 1; \
+    git clone --no-checkout https://github.com/alliedmodders/metamod-source.git /opt/sm-deps/mmsource-1.12; \
+    git -C /opt/sm-deps/mmsource-1.12 fetch --depth 1 origin "$MMSOURCE_COMMIT"; \
+    git -C /opt/sm-deps/mmsource-1.12 checkout --detach "$MMSOURCE_COMMIT"; \
+    git -C /opt/sm-deps/mmsource-1.12 submodule update --init --recursive --depth 1; \
+    git clone --no-checkout https://github.com/alliedmodders/ambuild.git /opt/sm-deps/ambuild; \
+    git -C /opt/sm-deps/ambuild fetch --depth 1 origin "$AMBUILD_COMMIT"; \
+    git -C /opt/sm-deps/ambuild checkout --detach "$AMBUILD_COMMIT"; \
+    python3 -m venv /opt/sm-deps/.venv; \
+    /opt/sm-deps/.venv/bin/python -m pip install --no-cache-dir /opt/sm-deps/ambuild; \
+    rm -f /tmp/build-deps.lock
+
+WORKDIR /workspace

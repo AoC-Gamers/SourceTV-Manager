@@ -39,6 +39,12 @@ TestResult.xml
 [Rr]eleasePS/
 dlldata.c
 
+# Native extension build outputs and local dependency checkouts
+.deps/
+.build/
+dist/
+.env
+
 # DNX
 project.lock.json
 artifacts/

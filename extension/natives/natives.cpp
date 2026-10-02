@@ -30,13 +30,25 @@
 */
 
 #include "extension.h"
-#include "natives.h"
-#include "hltvserverwrapper.h"
+#include "natives/natives.h"
+#include "core/hltvserverwrapper.h"
+#include "hooks/forwards.h"
 
 #define TICK_INTERVAL			(gpGlobals->interval_per_tick)
 #define TIME_TO_TICKS( dt )		( (int)( 0.5f + (float)(dt) / TICK_INTERVAL ) )
 
 extern const sp_nativeinfo_t sourcetv_natives[];
+
+// SourcePawn cell lengths are signed; reject non-positive values before
+// converting them to the unsigned size expected by StringToLocalUTF8.
+static bool CopyStringToPlugin(IPluginContext *context, cell_t address, cell_t maxlen, const char *value)
+{
+	if (maxlen <= 0)
+		return false;
+
+	context->StringToLocalUTF8(address, static_cast<size_t>(maxlen), value, nullptr);
+	return true;
+}
 
 // Print to client consoles
 SH_DECL_MANUALHOOK0_void_vafmt(CBaseServer_BroadcastPrintf, 0, 0, 0);
@@ -141,9 +153,7 @@ static cell_t Native_GetServerIP(IPluginContext *pContext, const cell_t *params)
 
 	char buf[16];
 	V_snprintf(buf, sizeof(buf), "%d.%d.%d.%d", adr->ip[0], adr->ip[1], adr->ip[2], adr->ip[3]);
-	pContext->StringToLocalUTF8(params[1], static_cast<size_t>(params[2]), buf, NULL);
-
-	return 1;
+	return CopyStringToPlugin(pContext, params[1], params[2], buf);
 }
 
 // native SourceTV_GetServerPort();
@@ -515,7 +525,8 @@ static cell_t Native_StartRecording(IPluginContext *pContext, const cell_t *para
 		return 0;
 
 	char *pFile;
-	pContext->LocalToString(params[1], &pFile);
+	if (pContext->LocalToString(params[1], &pFile) != SP_ERROR_NONE)
+		return 0;
 	
 	// Invalid path.
 	if (!IsValidPath(pFile))
@@ -548,7 +559,130 @@ static cell_t Native_StartRecording(IPluginContext *pContext, const cell_t *para
 #endif
 
 	hltvserver->GetDemoRecorder()->StartRecording(pPath, false);
+	IDemoRecorder *recorder = hltvserver->GetDemoRecorder();
+	if (!recorder->IsRecording())
+		return 0;
+	const char *actualPath = hltvserver->GetDemoFileName();
+	if (!actualPath || stricmp(actualPath, pPath) != 0)
+	{
+#if SOURCE_ENGINE == SE_CSGO
+		recorder->StopRecording(NULL);
+#else
+		recorder->StopRecording();
+#endif
+		return 0;
+	}
+	return 1;
+}
 
+static cell_t Native_StartRecordingEx(IPluginContext *pContext, const cell_t *params)
+{
+	cell_t *ownerTokenOutput;
+	pContext->LocalToPhysAddr(params[3], &ownerTokenOutput);
+	*ownerTokenOutput = 0;
+	if (hltvserver == nullptr || !hltvserver->GetDemoRecorder())
+		return 1; // RecorderUnavailable
+	if (!hltvserver->GetBaseServer()->IsActive())
+		return 2; // ServerInactive
+	if (!hltvserver->GetHLTVServer()->IsMasterProxy())
+		return 3; // NotMaster
+	IDemoRecorder *recorder = hltvserver->GetDemoRecorder();
+	if (recorder->IsRecording())
+		return 4; // AlreadyRecording
+
+	char *filename;
+	if (pContext->LocalToString(params[1], &filename) != SP_ERROR_NONE || !IsValidPath(filename))
+		return 5; // InvalidPath
+	char path[PLATFORM_MAX_PATH];
+	size_t length = strlen(filename);
+	const char *extension = libsys->GetFileExtension(filename);
+	if (!extension || stricmp(extension, "dem") != 0)
+		extension = ".dem";
+	else
+		extension = "";
+	if (length + strlen(extension) >= sizeof(path))
+		return 5; // InvalidPath
+	smutils->Format(path, sizeof(path), "%s%s", filename, extension);
+
+#if SOURCE_ENGINE == SE_CSGO
+	if (hltvdirector->GetHLTVServerCount() > 1)
+	{
+		for (int i = 0; i < hltvdirector->GetHLTVServerCount(); i++)
+		{
+			IHLTVServer *other = hltvdirector->GetHLTVServer(i);
+			if (other->IsRecording() && !stricmp(path, other->GetRecordingDemoFilename()))
+				return 5;
+		}
+	}
+#endif
+
+	IPlugin *plugin = plsys->FindPluginByContext(pContext->GetContext());
+	cell_t token = g_pSTVForwards.CreateRecordingOwner(plugin, recorder);
+	if (token == 0)
+		return 7; // OwnerTokenUnavailable
+	recorder->StartRecording(path, params[2] != 0);
+	const char *actualPath = hltvserver->GetDemoFileName();
+	if (!recorder->IsRecording() || !actualPath || stricmp(actualPath, path) != 0)
+	{
+		if (recorder->IsRecording())
+		{
+#if SOURCE_ENGINE == SE_CSGO
+			recorder->StopRecording(NULL);
+#else
+			recorder->StopRecording();
+#endif
+		}
+		g_pSTVForwards.ClearRecordingOwner(recorder);
+		return 6; // StartFailed
+	}
+	*ownerTokenOutput = token;
+	return 0; // Started
+}
+
+static cell_t Native_StopOwnedRecording(IPluginContext *pContext, const cell_t *params)
+{
+	if (!hltvserver || !hltvserver->GetDemoRecorder())
+		return 0;
+	IDemoRecorder *recorder = hltvserver->GetDemoRecorder();
+	IPlugin *plugin = plsys->FindPluginByContext(pContext->GetContext());
+	if (!g_pSTVForwards.IsRecordingOwner(plugin, recorder, params[1]) || !recorder->IsRecording())
+		return 0;
+#if SOURCE_ENGINE == SE_CSGO
+	recorder->StopRecording(NULL);
+#else
+	recorder->StopRecording();
+#endif
+	return !recorder->IsRecording();
+}
+
+static cell_t Native_GetRecordingSnapshot(IPluginContext *pContext, const cell_t *params)
+{
+	cell_t *recording, *ownerToken, *instance, *tick;
+	pContext->LocalToPhysAddr(params[1], &recording);
+	pContext->LocalToPhysAddr(params[2], &ownerToken);
+	pContext->LocalToPhysAddr(params[3], &instance);
+	pContext->LocalToPhysAddr(params[6], &tick);
+	*recording = 0;
+	*ownerToken = 0;
+	*instance = -1;
+	*tick = -1;
+	if (params[5] > 0)
+		CopyStringToPlugin(pContext, params[4], params[5], "");
+	if (!hltvserver || !hltvserver->GetDemoRecorder())
+		return 0;
+	IDemoRecorder *recorder = hltvserver->GetDemoRecorder();
+	*instance = hltvserver->GetInstanceNumber();
+	if (!recorder->IsRecording())
+		return 1;
+	const char *path = hltvserver->GetDemoFileName();
+	if (path && params[5] > 0)
+		CopyStringToPlugin(pContext, params[4], params[5], path);
+	*recording = 1;
+	cell_t activeOwnerToken = g_pSTVForwards.GetRecordingOwnerToken(recorder);
+	IPlugin *plugin = plsys->FindPluginByContext(pContext->GetContext());
+	if (g_pSTVForwards.IsRecordingOwner(plugin, recorder, activeOwnerToken))
+		*ownerToken = activeOwnerToken;
+	*tick = recorder->GetRecordingTick();
 	return 1;
 }
 
@@ -565,12 +699,17 @@ static cell_t Native_StopRecording(IPluginContext *pContext, const cell_t *param
 	// Not recording
 	if (!hltvserver->GetDemoRecorder()->IsRecording())
 		return 0;
+	IDemoRecorder *recorder = hltvserver->GetDemoRecorder();
+	cell_t ownerToken = g_pSTVForwards.GetRecordingOwnerToken(recorder);
+	IPlugin *plugin = plsys->FindPluginByContext(pContext->GetContext());
+	if (ownerToken != 0 && !g_pSTVForwards.IsRecordingOwner(plugin, recorder, ownerToken))
+		return 0;
 
 #if SOURCE_ENGINE == SE_CSGO
-	hltvserver->GetDemoRecorder()->StopRecording(NULL);
+	recorder->StopRecording(NULL);
 	// TODO: Stop recording on all other active hltvservers (tv_stoprecord in csgo does this)
 #else
-	hltvserver->GetDemoRecorder()->StopRecording();
+	recorder->StopRecording();
 #endif
 
 	return 1;
@@ -590,13 +729,11 @@ static cell_t Native_GetDemoFileName(IPluginContext *pContext, const cell_t *par
 	if (!hltvserver->GetDemoRecorder()->IsRecording())
 		return 0;
 
-	char *pDemoFile = hltvserver->GetDemoFileName();
+	const char *pDemoFile = hltvserver->GetDemoFileName();
 	if (!pDemoFile)
 		return 0;
 
-	pContext->StringToLocalUTF8(params[1], params[2], pDemoFile, NULL);
-
-	return 1;
+	return CopyStringToPlugin(pContext, params[1], params[2], pDemoFile);
 }
 
 // native SourceTV_GetRecordingTick();
@@ -683,8 +820,8 @@ static cell_t Native_IsClientConnected(IPluginContext *pContext, const cell_t *p
 		return 0;
 	}
 
-	HLTVClientWrapper *pClient = hltvserver->GetClient(client);
-	return pClient->IsConnected();
+	HLTVClientWrapper *pClient = hltvserver->FindClient(client);
+	return pClient && pClient->IsConnected();
 }
 
 // native bool:SourceTV_IsClientProxy(client);
@@ -700,8 +837,8 @@ static cell_t Native_IsClientProxy(IPluginContext *pContext, const cell_t *param
 		return 0;
 	}
 
-	HLTVClientWrapper *pClient = hltvserver->GetClient(client);
-	if (!pClient->IsConnected())
+	HLTVClientWrapper *pClient = hltvserver->FindClient(client);
+	if (!pClient || !pClient->IsConnected())
 	{
 		pContext->ReportError("Client %d is not connected.", client);
 		return 0;
@@ -723,14 +860,14 @@ static cell_t Native_GetClientName(IPluginContext *pContext, const cell_t *param
 		return 0;
 	}
 
-	HLTVClientWrapper *pClient = hltvserver->GetClient(client);
-	if (!pClient->IsConnected())
+	HLTVClientWrapper *pClient = hltvserver->FindClient(client);
+	if (!pClient || !pClient->IsConnected())
 	{
 		pContext->ReportError("Client %d is not connected.", client);
 		return 0;
 	}
 	
-	pContext->StringToLocalUTF8(params[2], static_cast<size_t>(params[3]), pClient->Name(), NULL);
+	CopyStringToPlugin(pContext, params[2], params[3], pClient->Name());
 	return 0;
 }
 
@@ -747,14 +884,14 @@ static cell_t Native_GetClientIP(IPluginContext *pContext, const cell_t *params)
 		return 0;
 	}
 
-	HLTVClientWrapper *pClient = hltvserver->GetClient(client);
-	if (!pClient->IsConnected())
+	HLTVClientWrapper *pClient = hltvserver->FindClient(client);
+	if (!pClient || !pClient->IsConnected())
 	{
 		pContext->ReportError("Client %d is not connected.", client);
 		return 0;
 	}
 
-	pContext->StringToLocalUTF8(params[2], static_cast<size_t>(params[3]), pClient->Ip(), NULL);
+	CopyStringToPlugin(pContext, params[2], params[3], pClient->Ip());
 	return 0;
 }
 
@@ -771,14 +908,14 @@ static cell_t Native_GetClientPassword(IPluginContext *pContext, const cell_t *p
 		return 0;
 	}
 
-	HLTVClientWrapper *pClient = hltvserver->GetClient(client);
-	if (!pClient->IsConnected())
+	HLTVClientWrapper *pClient = hltvserver->FindClient(client);
+	if (!pClient || !pClient->IsConnected())
 	{
 		pContext->ReportError("Client %d is not connected.", client);
 		return 0;
 	}
 
-	pContext->StringToLocalUTF8(params[2], static_cast<size_t>(params[3]), pClient->Password(), NULL);
+	CopyStringToPlugin(pContext, params[2], params[3], pClient->Password());
 	return 0;
 }
 
@@ -795,15 +932,16 @@ static cell_t Native_KickClient(IPluginContext *pContext, const cell_t *params)
 		return 0;
 	}
 
-	HLTVClientWrapper *pClient = hltvserver->GetClient(client);
-	if (!pClient->IsConnected())
+	HLTVClientWrapper *pClient = hltvserver->FindClient(client);
+	if (!pClient || !pClient->IsConnected())
 	{
 		pContext->ReportError("Client %d is not connected.", client);
 		return 0;
 	}
 
 	char *pReason;
-	pContext->LocalToString(params[2], &pReason);
+	if (pContext->LocalToString(params[2], &pReason) != SP_ERROR_NONE)
+		return 0;
 
 	pClient->Kick(pReason);
 	return 0;
@@ -822,8 +960,8 @@ static cell_t Native_PrintToChat(IPluginContext *pContext, const cell_t *params)
 		return 0;
 	}
 
-	HLTVClientWrapper *pClient = hltvserver->GetClient(client);
-	if (!pClient->IsConnected())
+	HLTVClientWrapper *pClient = hltvserver->FindClient(client);
+	if (!pClient || !pClient->IsConnected())
 	{
 		pContext->ReportError("Client %d is not connected.", client);
 		return 0;
@@ -892,8 +1030,8 @@ static cell_t Native_PrintToConsole(IPluginContext *pContext, const cell_t *para
 		return 0;
 	}
 
-	HLTVClientWrapper *pClient = hltvserver->GetClient(client);
-	if (!pClient->IsConnected())
+	HLTVClientWrapper *pClient = hltvserver->FindClient(client);
+	if (!pClient || !pClient->IsConnected())
 	{
 		pContext->ReportError("Client %d is not connected.", client);
 		return 0;
@@ -943,8 +1081,8 @@ static cell_t Native_SetClientTVTitle(IPluginContext *pContext, const cell_t *pa
 		return 0;
 	}
 
-	HLTVClientWrapper *pClient = hltvserver->GetClient(client);
-	if (!pClient->IsConnected())
+	HLTVClientWrapper *pClient = hltvserver->FindClient(client);
+	if (!pClient || !pClient->IsConnected())
 	{
 		pContext->ReportError("Client %d is not connected.", client);
 		return 0;
@@ -1006,6 +1144,9 @@ const sp_nativeinfo_t sourcetv_natives[] =
 	{ "SourceTV_ForceFixedCameraShot", Native_ForceFixedCameraShot },
 	{ "SourceTV_ForceChaseCameraShot", Native_ForceChaseCameraShot },
 	{ "SourceTV_StartRecording", Native_StartRecording },
+	{ "SourceTV_StartRecordingEx", Native_StartRecordingEx },
+	{ "SourceTV_StopOwnedRecording", Native_StopOwnedRecording },
+	{ "SourceTV_GetRecordingSnapshot", Native_GetRecordingSnapshot },
 	{ "SourceTV_StopRecording", Native_StopRecording },
 	{ "SourceTV_IsRecording", Native_IsRecording },
 	{ "SourceTV_GetDemoFileName", Native_GetDemoFileName },

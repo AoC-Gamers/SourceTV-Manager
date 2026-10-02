@@ -33,6 +33,8 @@
 #define _INCLUDE_SOURCEMOD_EXTENSION_FORWARDS_H_
 
 #include "extension.h"
+#include <string>
+#include <unordered_map>
 
 #if SOURCE_ENGINE == SE_CSGO
 #include "netmessages.pb.h"
@@ -57,9 +59,10 @@ typedef enum EAuthProtocol
 
 class CGameInfo;
 
-class CForwardManager
+class CForwardManager : public IPluginsListener
 {
 public:
+	void OnPluginUnloaded(IPlugin *plugin) override;
 	void Init();
 	void Shutdown();
 
@@ -80,10 +83,18 @@ public:
 	void CallOnServerShutdown(IHLTVServer *server);
 
 	void CallOnStartRecording(IDemoRecorder *recorder, const char *filename, bool bContinuously);
+	void CaptureRecordingStartState(IDemoRecorder *recorder);
 	void CallOnStopRecording(IDemoRecorder *recorder);
+	void CallOnRecordingFileClosed(IDemoRecorder *recorder);
+	void CallOnRecorderAvailabilityChanged(int instance, bool available);
+	cell_t CreateRecordingOwner(IPlugin *plugin, IDemoRecorder *recorder);
+	bool IsRecordingOwner(IPlugin *plugin, IDemoRecorder *recorder, cell_t token);
+	void ClearRecordingOwner(IDemoRecorder *recorder);
+	cell_t GetRecordingOwnerToken(IDemoRecorder *recorder);
 
 	bool CallOnSpectatorChatMessage(HLTVServerWrapper *server, char *msg, int msglen, char *chatgroup, int grouplen);
 	void CallOnSpectatorChatMessage_Post(HLTVServerWrapper *server, const char *msg, const char *chatgroup);
+	bool HasSpectatorChatListeners();
 
 	bool BaseClient_OnSpectatorExecuteStringCommand(const char *s);
 	bool IClient_OnSpectatorExecuteStringCommand(const char *s);
@@ -96,15 +107,19 @@ private:
 	void UnhookClient(IClient *client);
 
 private:
+	void OnStartRecording_Pre(const char *filename, bool bContinuously);
 	void OnStartRecording_Post(const char *filename, bool bContinuously);
 #if SOURCE_ENGINE == SE_CSGO
 	void OnStopRecording(CGameInfo const *info);
+	void OnStopRecording_Post(CGameInfo const *info);
 	IClient *OnSpectatorConnect(const netadr_t & address, int nProtocol, int iChallenge, int nAuthProtocol, const char *pchName, const char *pchPassword, const char *pCookie, int cbCookie, CUtlVector<NetMsg_SplitPlayerConnect *> &pSplitPlayerConnectVector, bool bUnknown, CrossPlayPlatform_t platform, const unsigned char *pUnknown, int iUnknown);
 #elif SOURCE_ENGINE == SE_LEFT4DEAD || SOURCE_ENGINE == SE_LEFT4DEAD2
 	void OnStopRecording();
+	void OnStopRecording_Post();
 	IClient *OnSpectatorConnect(const netadr_t & address, int nProtocol, int iChallenge, int iClientChallenge, const char * pchName, const char * pchPassword, const char * pCookie, int, CUtlVector<CLC_SplitPlayerConnect *> &pSplitPlayerConnectVector, bool bUnknown);
 #else
 	void OnStopRecording();
+	void OnStopRecording_Post();
 	IClient *OnSpectatorConnect(netadr_t &address, int nProtocol, int iChallenge, int iClientChallenge, int nAuthProtocol, const char *pchName, const char *pchPassword, const char *pCookie, int cbCookie);
 #endif
 	void BaseClient_OnSpectatorDisconnect(const char *reason);
@@ -120,6 +135,32 @@ private:
 private:
 	IForward *m_StartRecordingFwd;
 	IForward *m_StopRecordingFwd;
+	IForward *m_RecordingFileStartedFwd;
+	IForward *m_RecordingFileClosedFwd;
+	IForward *m_RecorderAvailabilityChangedFwd;
+	struct PendingRecordingClose
+	{
+		int instance;
+		int tick;
+		std::string filename;
+	};
+	struct PendingRecordingStart
+	{
+		bool wasRecording;
+		std::string filename;
+	};
+	struct RecordingOwner
+	{
+		IPlugin *plugin;
+		unsigned int pluginSerial;
+		IDemoRecorder *recorder;
+		cell_t token;
+	};
+	std::unordered_map<IDemoRecorder *, PendingRecordingClose> m_PendingRecordingCloses;
+	std::unordered_map<IDemoRecorder *, PendingRecordingStart> m_PendingRecordingStarts;
+	RecordingOwner m_RecordingOwner = { nullptr, 0, nullptr, 0 };
+	cell_t m_NextRecordingOwnerToken = 1;
+	bool m_bRecordingOwnerTokensExhausted = false;
 	IForward *m_SpectatorPreConnectFwd;
 	IForward *m_SpectatorConnectedFwd;
 	IForward *m_SpectatorDisconnectFwd;

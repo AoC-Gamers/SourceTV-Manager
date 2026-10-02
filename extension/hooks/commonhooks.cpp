@@ -30,9 +30,9 @@
 */
 
 #include "extension.h"
-#include "commonhooks.h"
-#include "forwards.h"
-#include "hltvserverwrapper.h"
+#include "hooks/commonhooks.h"
+#include "hooks/forwards.h"
+#include "core/hltvserverwrapper.h"
 
 CCommonHooks g_pSTVCommonHooks;
 

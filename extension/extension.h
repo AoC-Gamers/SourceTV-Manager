@@ -46,15 +46,15 @@
 #include "iserver.h"
 #include "iclient.h"
 #if SOURCE_ENGINE == SE_CSGO
-# include "ihltvdemorecorder_csgo.h"
+# include "sdk/engine/ihltvdemorecorder_csgo.h"
 #else
-# include "ihltvdemorecorder.h"
+# include "sdk/engine/ihltvdemorecorder.h"
 #endif
 #include "igameevents.h"
 #include "inetmessage.h"
 #include "netadr.h"
-#include "hltvdirectorwrapper.h"
-#include "hltvclientwrapper.h"
+#include "core/hltvdirectorwrapper.h"
+#include "core/hltvclientwrapper.h"
 
 class INetMessage;
 class HLTVServerWrapper;

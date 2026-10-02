@@ -35,12 +35,12 @@ def CopyFiles(src, dest, files):
 
 # Include files 
 CopyFiles('', 'addons/sourcemod/scripting/include',
-  [ 'sourcetvmanager.inc', ]
+  [ 'scripting/include/sourcetvmanager.inc', ]
 )
 
 # GameData files
 CopyFiles('', 'addons/sourcemod/gamedata',
-  [ 'sourcetvmanager.games.txt' ]
+  [ 'gamedata/sourcetvmanager.games.txt' ]
 )
 
 # Config Files
