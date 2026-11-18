@@ -33,5 +33,6 @@
 #define _INCLUDE_SOURCEMOD_EXTENSION_NATIVES_H_
 
 void SetupNativeCalls();
+void ShutdownNativeCalls();
 
 #endif // _INCLUDE_SOURCEMOD_EXTENSION_NATIVES_H_

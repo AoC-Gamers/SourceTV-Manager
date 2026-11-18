@@ -115,6 +115,7 @@ jobs:
         run: |
           make "deps-exts-$PLATFORM" PYTHON=python
           make "build-exts-$PLATFORM" PYTHON=python
+          if [[ "$PLATFORM" == linux ]]; then make test-coexistence PYTHON=python; fi
           make "package-exts-$PLATFORM" PYTHON=python
           make "release-$PLATFORM" PYTHON=python
           make "validate-artifact-$PLATFORM" PYTHON=python

@@ -34,14 +34,16 @@
 
 #include "extension.h"
 #include "amtl/am-utility.h"
+#include "amtl/am-refcounting.h"
 #include <vector>
 #include <memory>
 #include <string>
 
-class HLTVServerWrapper {
+class HLTVServerWrapper : public ke::Refcounted<HLTVServerWrapper> {
 public:
 	HLTVServerWrapper(IHLTVServer *hltvserver);
-	void Shutdown(bool bInformPlugins);
+	bool BeginShutdown();
+	bool IsActive() const { return m_Active; }
 
 	IHLTVServer *GetHLTVServer();
 	IServer *GetBaseServer();
@@ -51,15 +53,11 @@ public:
 	HLTVClientWrapper *FindClient(int index) const;
 	int GetInstanceNumber();
 
-	IClient *GetLastChatClient();
-	void SetLastChatClient(IClient *client);
-	const char *GetLastChatMessage() const;
-	void SetLastChatMessage(const char *msg);
-
 	bool OnHLTVBotExecuteStringCommand(const char *s);
 	bool OnHLTVBotExecuteStringCommand_Post(const char *s);
 
 private:
+	friend class HLTVServerWrapperManager;
 	void Hook();
 	void Unhook();
 
@@ -73,15 +71,14 @@ private:
 #endif
 
 private:
-	bool m_Connected = false;
+	bool m_Active = true;
+	bool m_AnnouncedRecorder = false;
+	IServer *m_BaseServer = nullptr;
+	IClient *m_BotClient = nullptr;
 	IHLTVServer *m_HLTVServer = nullptr;
 	IDemoRecorder *m_DemoRecorder = nullptr;
 	std::vector<std::unique_ptr<HLTVClientWrapper>> m_Clients;
 
-	IClient *m_LastChatClient = nullptr;
-	// Own the parsed chat text because CCommand's argument storage is temporary.
-	std::string m_LastChatMessage;
-	bool m_HasLastChatMessage = false;
 };
 
 class HLTVServerWrapperManager
@@ -89,6 +86,9 @@ class HLTVServerWrapperManager
 public:
 	void InitHooks();
 	void ShutdownHooks();
+	void StartAcceptingServers() { m_AcceptServers = true; }
+	void ShutdownServers();
+	ke::RefPtr<HLTVServerWrapper> Pin(const HLTVServerWrapper *wrapper) const;
 	void AddServer(IHLTVServer *hltvserver);
 	void RemoveServer(IHLTVServer *hltvserver, bool bInformPlugins);
 	HLTVServerWrapper *GetWrapper(IHLTVServer *hltvserver);
@@ -101,6 +101,7 @@ public:
 	bool HasShutdownOffset();
 
 #if SOURCE_ENGINE != SE_CSGO
+	bool CanRedirectPrintf() const { return m_bSendNetMsgHooked; }
 	bool OnHLTVBotNetChanSendNetMsg(INetMessage &msg, bool bForceReliable, bool bVoice);
 #endif
 
@@ -110,7 +111,8 @@ private:
 #endif
 	bool m_bHasClientPrintfOffset = false;
 	bool m_bHasShutdownOffset = false;
-	std::vector<std::unique_ptr<HLTVServerWrapper>> m_HLTVServers;
+	bool m_AcceptServers = false;
+	std::vector<ke::RefPtr<HLTVServerWrapper>> m_HLTVServers;
 };
 
 extern HLTVServerWrapperManager g_HLTVServers;

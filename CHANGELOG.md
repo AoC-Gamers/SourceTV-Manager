@@ -10,6 +10,25 @@
   conserva el paquete anterior que usa tu servidor. El ZIP incluye el README
   del proyecto y se verifica contra los binarios y dependencias de la compilación.
 
+### Corregido
+
+- **Grabación.** Una operación anidada que reemplaza la sesión invalida las
+  acciones pendientes sobre la sesión anterior, incluso con el mismo nombre
+  de archivo. Una parada interna sin archivo abierto conserva el inicio y
+  su token de propietario. Los cierres preservan el archivo y tick previos.
+
+- **Espectadores.** Las conexiones y el chat anidados tienen contextos
+  independientes. Los rechazos vacíos se inicializan y el texto se trata como
+  datos. La conexión conserva el orden de hooks de SourceHook y los comandos
+  de SourceTV restauran el host y el canal previos.
+- **Ciclo de vida.** Los forwards de inicio observan una instancia registrada.
+  Al cerrar, la extensión retira los hooks de los receptores que registró.
+  Libera las llamadas de eventos locales antes de que se retire BinTools.
+
+- **Eventos locales y chat.** En L4D2 Linux x86, ambas rutas usan el
+  desplazamiento del subobjeto que devuelve el motor. El envío local de eventos
+  y los forwards de chat usan la misma entrada de gamedata.
+
 ### Desarrollo
 
 - GNU Make centraliza la preparación de dependencias, la compilación, las pruebas y el empaquetado local y en CI.

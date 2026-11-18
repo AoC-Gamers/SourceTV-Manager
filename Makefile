@@ -29,6 +29,13 @@ help:
 	  'make release-<linux|windows>          Generar ZIP local (RELEASE_CHANNEL=develop|latest)' \
 	  'make validate-artifact-<linux|windows> Verificar staging y ZIP contra el build' \
 	  'make test                            Probar el contrato de distribución' \
+	  'make test-public-api                 Comparar el contrato público congelado' \
+	  'make test-pawn-boundary              Probar traducciones y límites de Pawn en C++' \
+	  'make test-pawn-boundary-vm           Probar límites de memoria en una VM local' \
+	  'make test-native                     Ejecutar pruebas C++ puras (x86 por defecto)' \
+	  'make test-abi                        Ejecutar el probe de ABI Linux x86' \
+	  'make test-coverage                   Medir cobertura local C++ y Python' \
+	  'make test-coexistence                Probar la cadena de hooks con SourceHook x86' \
 	  'make sonar-cppcheck / sonar          Analizar el build Linux localmente' \
 	  'make clean-<linux|windows>            Limpiar la salida de AMBuild' \
 	  'make build-linux-container           Compilar y preparar staging en Compose'
@@ -55,10 +62,63 @@ release-linux release-windows:
 validate-artifact-linux validate-artifact-windows:
 	$(ARTIFACT_TOOL) validate $(ARTIFACT_ARGS)
 
-test-ci: test
+test-ci: test test-public-api
+
+.PHONY: test-public-api
+test-public-api:
+	$(PYTHON) -B "$(ROOT_DIR)/tests/contract.py"
 
 test:
 	$(PYTHON) -B -m unittest discover -s "$(ROOT_DIR)/tests/package"
+
+NATIVE_CXXFLAGS ?= -m32 -std=c++17 -Wall -Wextra
+
+.PHONY: test-native
+test-native:
+	@mkdir -p "$(ROOT_DIR)/.build"
+	@set -euo pipefail; \
+	  output="$$(mktemp -d "$(ROOT_DIR)/.build/native.XXXXXX")"; \
+	  printf 'Output: %s\n' "$$output"; \
+	  { $(CXX) --version; printf 'Flags: %s\n' "$(NATIVE_CXXFLAGS)"; } | tee "$$output/toolchain.txt"; \
+	  $(CXX) $(NATIVE_CXXFLAGS) -I"$(ROOT_DIR)/extension/natives" \
+	    "$(ROOT_DIR)/tests/native/recording_path.cpp" -o "$$output/test-native"; \
+	  "$$output/test-native" | tee "$$output/result.txt"; \
+	  $(CXX) $(NATIVE_CXXFLAGS) -I"$(ROOT_DIR)/extension/core" \
+	    "$(ROOT_DIR)/tests/native/recording_sessions.cpp" -o "$$output/recording_sessions"; \
+	  "$$output/recording_sessions" | tee -a "$$output/result.txt"; \
+	  $(CXX) $(NATIVE_CXXFLAGS) -I"$(ROOT_DIR)/extension/core" \
+	    "$(ROOT_DIR)/tests/native/hook_context.cpp" -o "$$output/hook_context"; \
+	  "$$output/hook_context" | tee -a "$$output/result.txt"
+
+
+.PHONY: test-pawn-boundary
+test-pawn-boundary: PLATFORM := linux
+test-pawn-boundary:
+	@mkdir -p "$(ROOT_DIR)/.build"
+	@set -euo pipefail; \
+	  output="$$(mktemp -d "$(ROOT_DIR)/.build/pawn-boundary.XXXXXX")"; \
+	  printf 'Output: %s\n' "$$output"; \
+	  $(CXX) $(NATIVE_CXXFLAGS) -isystem "$(SOURCEMOD_DIR)/sourcepawn/include" \
+	    -I"$(ROOT_DIR)/extension/natives" "$(ROOT_DIR)/tests/native/pawn_boundary.cpp" -o "$$output/pawn-boundary"; \
+	  "$$output/pawn-boundary" | tee "$$output/result.txt"
+
+
+PAWN_VM_CXXFLAGS ?= -std=c++17 -Wall -Wextra
+PAWN_VM ?=
+
+.PHONY: test-pawn-boundary-vm
+test-pawn-boundary-vm: PLATFORM := linux
+test-pawn-boundary-vm:
+	@test -f "$(PAWN_VM)" || { printf '%s\n' 'Indica PAWN_VM con la biblioteca local de SourcePawn.' >&2; exit 1; }
+	@mkdir -p "$(ROOT_DIR)/.build"
+	@set -euo pipefail; \
+	  output="$$(mktemp -d "$(ROOT_DIR)/.build/pawn-boundary-vm.XXXXXX")"; \
+	  printf 'Output: %s\n' "$$output"; \
+	  "$(SPCOMP)" "$(ROOT_DIR)/tests/native/pawn_boundary_fixture.sp" -o"$$output/fixture.smx"; \
+	  $(CXX) $(PAWN_VM_CXXFLAGS) -isystem "$(SOURCEMOD_DIR)/sourcepawn/include" \
+	    -I"$(ROOT_DIR)/extension/natives" "$(ROOT_DIR)/tests/native/pawn_boundary_vm.cpp" -ldl -o "$$output/pawn-boundary-vm"; \
+	  "$$output/pawn-boundary-vm" "$$(realpath -- "$(PAWN_VM)")" "$$output/fixture.smx" | tee "$$output/result.txt"
+
 
 sonar:
 	$(PYTHON) "$(SCRIPT_DIR)/tools/make_sonar.py" analyze --compile-commands "$(BUILD_DIR)/compile_commands.json"
@@ -111,3 +171,44 @@ test-package-coverage:
 	COVERAGE_FILE="$(PACKAGE_COVERAGE_DIR)/.coverage" "$(COVERAGE)" xml \
 	  -o "$(PACKAGE_COVERAGE_DIR)/coverage.xml"
 	COVERAGE_FILE="$(PACKAGE_COVERAGE_DIR)/.coverage" "$(COVERAGE)" report
+
+.PHONY: test-abi
+test-abi: PLATFORM := linux
+test-abi:
+	@mkdir -p "$(ROOT_DIR)/.build"
+	@set -euo pipefail; \
+	  output="$$(mktemp -d "$(ROOT_DIR)/.build/abi.XXXXXX")"; \
+	  bintools="$(SOURCEMOD_DIR)/extensions/bintools"; \
+	  $(CXX) -m32 -std=c++17 -DPOSIX -DLINUX -D_LINUX -DHAVE_STDINT_H \
+	    -I"$(ROOT_DIR)/extension" -isystem "$$bintools" \
+	    -isystem "$(MMSOURCE_DIR)/core/sourcehook" \
+	    -isystem "$(SOURCEMOD_DIR)/public" -isystem "$(SOURCEMOD_DIR)/public/extensions" \
+	    -isystem "$(SOURCEMOD_DIR)/public/amtl" -isystem "$(SOURCEMOD_DIR)/public/amtl/amtl" \
+	    -isystem "$(SOURCEMOD_DIR)/public/jit" -isystem "$(SOURCEMOD_DIR)/public/jit/x86" \
+	    -isystem "$(SOURCEMOD_DIR)/sourcepawn/include" \
+	    "$(ROOT_DIR)/tests/native/local_hltv_binding.cpp" \
+	    "$$bintools/CallMaker.cpp" "$$bintools/CallWrapper.cpp" "$$bintools/jit_call.cpp" \
+	    -o "$$output/local-hltv-binding"; \
+	  "$$output/local-hltv-binding" | tee "$$output/result.txt"
+
+.PHONY: test-coexistence
+test-coexistence: PLATFORM := linux
+test-coexistence:
+	@mkdir -p "$(ROOT_DIR)/.build"
+	@set -euo pipefail; \
+	  output="$$(mktemp -d "$(ROOT_DIR)/.build/coexistence.XXXXXX")"; \
+	  sh_dir="$(MMSOURCE_DIR)/core/sourcehook"; \
+	  $(CXX) -m32 -std=c++17 -fno-devirtualize -I"$(ROOT_DIR)/extension" -isystem "$$sh_dir" \
+	    "$(ROOT_DIR)/tests/native/connect_coexistence.cpp" \
+	    "$$sh_dir/sourcehook.cpp" "$$sh_dir/sourcehook_impl_chookmaninfo.cpp" \
+	    "$$sh_dir/sourcehook_impl_chookidman.cpp" "$$sh_dir/sourcehook_impl_cproto.cpp" \
+	    "$$sh_dir/sourcehook_impl_cvfnptr.cpp" -o "$$output/connect-coexistence"; \
+	  "$$output/connect-coexistence" | tee "$$output/result.txt"
+
+COVERAGE_PYTHON ?= $(PYTHON)
+
+.PHONY: test-coverage
+test-coverage: DEFAULT_BUILD_DIR := $(ROOT_DIR)/.build/linux-l4d2
+test-coverage: PLATFORM := linux
+test-coverage: build-exts-linux
+	$(PYTHON) "$(SCRIPT_DIR)/tools/local_coverage.py" --compile-commands "$(BUILD_DIR)/compile_commands.json" --coverage-python "$(COVERAGE_PYTHON)"

@@ -30,6 +30,7 @@
  */
 
 #include "extension.h"
+#include "core/local_hltv_broadcast.h"
 #include "core/hltvserverwrapper.h"
 #include "hooks/forwards.h"
 #include "natives/natives.h"
@@ -46,10 +47,6 @@ IBinTools *bintools = nullptr;
 ISDKTools *sdktools = nullptr;
 IServer *iserver = nullptr;
 IGameConfig *g_pGameConf = nullptr;
-
-#if SOURCE_ENGINE != SE_CSGO
-bool g_SendNetMsgHooked = false;
-#endif
 
 #if SOURCE_ENGINE == SE_CSGO
 SH_DECL_HOOK1_void(IHLTVDirector, AddHLTVServer, SH_NOATTRIB, 0, IHLTVServer *);
@@ -105,12 +102,8 @@ bool SourceTVManager::SDK_OnLoad(char *error, size_t maxlength, bool late)
 
 void SourceTVManager::SDK_OnAllLoaded()
 {
-#if SOURCE_ENGINE == SE_CSGO
-	SH_ADD_HOOK(IHLTVDirector, AddHLTVServer, hltvdirector, SH_MEMBER(this, &SourceTVManager::OnAddHLTVServer_Post), true);
-	SH_ADD_HOOK(IHLTVDirector, RemoveHLTVServer, hltvdirector, SH_MEMBER(this, &SourceTVManager::OnRemoveHLTVServer), false);
-#else
-	SH_ADD_HOOK(IHLTVDirector, SetHLTVServer, hltvdirector, SH_MEMBER(this, &SourceTVManager::OnSetHLTVServer_Post), true);
-#endif
+	if (m_DirectorHooksInstalled)
+		return;
 
 	SM_GET_LATE_IFACE(BINTOOLS, bintools);
 	if (!bintools)
@@ -125,11 +118,21 @@ void SourceTVManager::SDK_OnAllLoaded()
 
 	g_pSTVForwards.Init();
 	SetupNativeCalls();
+	SetupLocalHltvBroadcast();
 
 	if (sdktools)
 		iserver = sdktools->GetIServer();
 	if (!iserver)
 		smutils->LogError(myself, "Failed to get IServer interface from SDKTools. Some functions won't work.");
+
+	g_HLTVServers.StartAcceptingServers();
+#if SOURCE_ENGINE == SE_CSGO
+	SH_ADD_HOOK(IHLTVDirector, AddHLTVServer, hltvdirector, SH_MEMBER(this, &SourceTVManager::OnAddHLTVServer_Post), true);
+	SH_ADD_HOOK(IHLTVDirector, RemoveHLTVServer, hltvdirector, SH_MEMBER(this, &SourceTVManager::OnRemoveHLTVServer), false);
+#else
+	SH_ADD_HOOK(IHLTVDirector, SetHLTVServer, hltvdirector, SH_MEMBER(this, &SourceTVManager::OnSetHLTVServer_Post), true);
+#endif
+	m_DirectorHooksInstalled = true;
 
 #if SOURCE_ENGINE == SE_CSGO
 	// Hook all the exisiting servers.
@@ -141,11 +144,7 @@ void SourceTVManager::SDK_OnAllLoaded()
 	if (hltvdirector->GetHLTVServerCount() > 0)
 		SelectSourceTVServer(hltvdirector->GetHLTVServer(0));
 #else
-	if (hltvdirector->GetHLTVServer())
-	{
-		g_HLTVServers.AddServer(hltvdirector->GetHLTVServer());
-		SelectSourceTVServer(hltvdirector->GetHLTVServer());
-	}
+	g_HLTVServers.AddServer(hltvdirector->GetHLTVServer());
 #endif
 }
 
@@ -171,30 +170,38 @@ bool SourceTVManager::RegisterConCommandBase(ConCommandBase *pCommandBase)
 
 void SourceTVManager::SDK_OnUnload()
 {
+	if (m_DirectorHooksInstalled) {
+		m_DirectorHooksInstalled = false;
 #if SOURCE_ENGINE == SE_CSGO
-	SH_REMOVE_HOOK(IHLTVDirector, AddHLTVServer, hltvdirector, SH_MEMBER(this, &SourceTVManager::OnAddHLTVServer_Post), true);
-	SH_REMOVE_HOOK(IHLTVDirector, RemoveHLTVServer, hltvdirector, SH_MEMBER(this, &SourceTVManager::OnRemoveHLTVServer), false);
+		SH_REMOVE_HOOK(IHLTVDirector, AddHLTVServer, hltvdirector, SH_MEMBER(this, &SourceTVManager::OnAddHLTVServer_Post), true);
+		SH_REMOVE_HOOK(IHLTVDirector, RemoveHLTVServer, hltvdirector, SH_MEMBER(this, &SourceTVManager::OnRemoveHLTVServer), false);
 #else
-	SH_REMOVE_HOOK(IHLTVDirector, SetHLTVServer, hltvdirector, SH_MEMBER(this, &SourceTVManager::OnSetHLTVServer_Post), true);
+		SH_REMOVE_HOOK(IHLTVDirector, SetHLTVServer, hltvdirector, SH_MEMBER(this, &SourceTVManager::OnSetHLTVServer_Post), true);
 #endif
-
-	g_HLTVServers.ShutdownHooks();
-
-	gameconfs->CloseGameConfigFile(g_pGameConf);
-
-#if SOURCE_ENGINE == SE_CSGO
-	// Unhook all the existing servers.
-	for (int i = 0; i < hltvdirector->GetHLTVServerCount(); i++)
-	{
-		// We don't know if the extension is just being unloaded or the server is shutting down.
-		// So don't inform the plugins of this removal.
-		g_HLTVServers.RemoveServer(hltvdirector->GetHLTVServer(i), false);
 	}
-#else
-	// Unhook the server
-	g_HLTVServers.RemoveServer(hltvdirector->GetHLTVServer(), false);
-#endif
+
+	g_HLTVServers.ShutdownServers();
+	g_HLTVServers.ShutdownHooks();
 	g_pSTVForwards.Shutdown();
+	ShutdownNativeCalls();
+
+	if (g_pGameConf) {
+		gameconfs->CloseGameConfigFile(g_pGameConf);
+		g_pGameConf = nullptr;
+	}
+	host_client = nullptr;
+	iserver = nullptr;
+	bintools = nullptr;
+	sdktools = nullptr;
+}
+
+void SourceTVManager::NotifyInterfaceDrop(SMInterface *interface)
+{
+	if (interface && (interface == bintools || interface == sdktools)) {
+		// SourceMod unloads the provider before it unloads dependent extensions.
+		// Retire the BinTools call wrapper while the provider code is still live.
+		SDK_OnUnload();
+	}
 }
 
 bool SourceTVManager::QueryRunning(char *error, size_t maxlength)
@@ -236,10 +243,10 @@ void SourceTVManager::OnRemoveHLTVServer(IHLTVServer *hltv)
 
 	// With the CHLTVServer::Shutdown hook, this isn't needed?
 	// Doesn't hurt either..
+	const bool wasSelected = hltvserver == wrapper;
 	g_HLTVServers.RemoveServer(hltv, true);
 
-	// We got this SourceTV server selected. Now it's gone :(
-	if (hltvserver == wrapper)
+	if (wasSelected && !hltvserver)
 	{
 		// Is there another one available? Try to keep us operable.
 		if (hltvdirector->GetHLTVServerCount() > 0)
@@ -267,13 +274,12 @@ void SourceTVManager::OnSetHLTVServer_Post(IHLTVServer *hltv)
 		// With the CHLTVServer::Shutdown hook, this isn't needed?
 		// Doesn't hurt either..
 		g_HLTVServers.RemoveServer(hltvserver->GetHLTVServer(), true);
+		RETURN_META(MRES_IGNORED);
 	}
-	// Only hook this server if it's a new one.
-	else if (!hltvserver || g_HLTVServers.GetWrapper(hltv) != hltvserver)
-	{
-		g_HLTVServers.AddServer(hltv);
-	}
-	SelectSourceTVServer(hltv);
+
+	g_HLTVServers.AddServer(hltv);
+	if (g_HLTVServers.GetWrapper(hltv))
+		SelectSourceTVServer(hltv);
 	RETURN_META(MRES_IGNORED);
 }
 #endif

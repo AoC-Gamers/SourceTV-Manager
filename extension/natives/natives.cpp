@@ -30,24 +30,24 @@
 */
 
 #include "extension.h"
+#include "core/local_hltv_broadcast.h"
 #include "natives/natives.h"
+#include "natives/recording_path.h"
+#include "natives/pawn_boundary.h"
 #include "core/hltvserverwrapper.h"
 #include "hooks/forwards.h"
 
-#define TICK_INTERVAL			(gpGlobals->interval_per_tick)
-#define TIME_TO_TICKS( dt )		( (int)( 0.5f + (float)(dt) / TICK_INTERVAL ) )
+namespace pawn = sourcetv::pawn;
 
 extern const sp_nativeinfo_t sourcetv_natives[];
 
-// SourcePawn cell lengths are signed; reject non-positive values before
-// converting them to the unsigned size expected by StringToLocalUTF8.
-static bool CopyStringToPlugin(IPluginContext *context, cell_t address, cell_t maxlen, const char *value)
-{
-	if (maxlen <= 0)
-		return false;
+namespace recording = sourcetv::recording;
 
-	context->StringToLocalUTF8(address, static_cast<size_t>(maxlen), value, nullptr);
-	return true;
+// SourceMod's formatter assumes the format address already resolves.
+static bool HasFormatString(IPluginContext& context, const cell_t *params, cell_t index)
+{
+	const char *format;
+	return params[0] >= index && pawn::ReadString(context, params[index], format);
 }
 
 // Print to client consoles
@@ -146,6 +146,10 @@ static cell_t Native_IsMasterProxy(IPluginContext *pContext, const cell_t *param
 // native bool:SourceTV_GetServerIP(String:ip[], maxlen);
 static cell_t Native_GetServerIP(IPluginContext *pContext, const cell_t *params)
 {
+	char *destination;
+	if (!pawn::ResolveBuffer(*pContext, params[1], params[2], destination))
+		return 0;
+
 	if (hltvserver == nullptr)
 		return 0;
 
@@ -153,7 +157,7 @@ static cell_t Native_GetServerIP(IPluginContext *pContext, const cell_t *params)
 
 	char buf[16];
 	V_snprintf(buf, sizeof(buf), "%d.%d.%d.%d", adr->ip[0], adr->ip[1], adr->ip[2], adr->ip[3]);
-	return CopyStringToPlugin(pContext, params[1], params[2], buf);
+	return pawn::WriteString(*pContext, params[1], params[2], destination, buf);
 }
 
 // native SourceTV_GetServerPort();
@@ -184,13 +188,14 @@ static cell_t Native_GetLocalStats(IPluginContext *pContext, const cell_t *param
 	if (hltvserver == nullptr)
 		return 0;
 
+	cell_t *plProxies, *plSlots, *plSpecs;
+	if (!pawn::ResolveCells(*pContext, params[1], plProxies)
+		|| !pawn::ResolveCells(*pContext, params[2], plSlots)
+		|| !pawn::ResolveCells(*pContext, params[3], plSpecs))
+		return 0;
+
 	int proxies, slots, specs;
 	hltvserver->GetHLTVServer()->GetLocalStats(proxies, slots, specs);
-
-	cell_t *plProxies, *plSlots, *plSpecs;
-	pContext->LocalToPhysAddr(params[1], &plProxies);
-	pContext->LocalToPhysAddr(params[2], &plSlots);
-	pContext->LocalToPhysAddr(params[3], &plSpecs);
 
 	*plProxies = proxies;
 	*plSlots = slots;
@@ -204,13 +209,14 @@ static cell_t Native_GetGlobalStats(IPluginContext *pContext, const cell_t *para
 	if (hltvserver == nullptr)
 		return 0;
 
+	cell_t *plProxies, *plSlots, *plSpecs;
+	if (!pawn::ResolveCells(*pContext, params[1], plProxies)
+		|| !pawn::ResolveCells(*pContext, params[2], plSlots)
+		|| !pawn::ResolveCells(*pContext, params[3], plSpecs))
+		return 0;
+
 	int proxies, slots, specs;
 	hltvserver->GetHLTVServer()->GetGlobalStats(proxies, slots, specs);
-
-	cell_t *plProxies, *plSlots, *plSpecs;
-	pContext->LocalToPhysAddr(params[1], &plProxies);
-	pContext->LocalToPhysAddr(params[2], &plSlots);
-	pContext->LocalToPhysAddr(params[3], &plSpecs);
 
 	*plProxies = proxies;
 	*plSlots = slots;
@@ -233,58 +239,26 @@ static cell_t Native_GetDelay(IPluginContext *pContext, const cell_t *params)
 	if (hltvserver == nullptr)
 		return -1;
 
-	return sp_ftoc(hltvdirector->GetDelay());
+	return pawn::FloatCell(hltvdirector->GetDelay());
 }
 
-static bool BroadcastEventLocal(IHLTVServer *server, IGameEvent *event, bool bReliable)
+void ShutdownNativeCalls()
 {
-	static ICallWrapper *pBroadcastEventLocal = nullptr;
-
-	if (!pBroadcastEventLocal)
-	{
-		void *addr = nullptr;
-		if (!g_pGameConf->GetMemSig("CHLTVServer::BroadcastEventLocal", &addr) || !addr)
-		{
-			smutils->LogError(myself, "Failed to get CHLTVServer::BroadcastEventLocal signature.");
-			return false;
-		}
-
-		if (!bintools)
-			return false;
-
-		PassInfo pass[2];
-		pass[0].flags = PASSFLAG_BYVAL;
-		pass[0].type = PassType_Basic;
-		pass[0].size = sizeof(IGameEvent *);
-		pass[1].flags = PASSFLAG_BYVAL;
-		pass[1].type = PassType_Basic;
-		pass[1].size = sizeof(bool);
-
-		pBroadcastEventLocal = bintools->CreateCall(addr, CallConv_ThisCall, NULL, pass, 2);
-	}
-
-	if (pBroadcastEventLocal)
-	{
-		unsigned char vstk[sizeof(void *) + sizeof(IGameEvent *) + sizeof(bool)];
-		unsigned char *vptr = vstk;
-		
-		IServer *iserver = server->GetBaseServer();
-		*(void **)vptr = (void *)((intptr_t)iserver - 8);
-		vptr += sizeof(void *);
-		*(IGameEvent **)vptr = event;
-		vptr += sizeof(IGameEvent *);
-		*(bool *)vptr = bReliable;
-
-		pBroadcastEventLocal->Execute(vstk, NULL);
-		return true;
-	}
-	return false;
+	g_bHasBroadcastPrintfOffset = false;
+	g_bHasClientFireGameEventOffset = false;
+	ShutdownLocalHltvBroadcast();
 }
 
 // native bool:SourceTV_BroadcastScreenMessage(bool:bLocalOnly, const String:format[], any:...);
 static cell_t Native_BroadcastScreenMessage(IPluginContext *pContext, const cell_t *params)
 {
 	if (hltvserver == nullptr)
+		return 0;
+	if (!HasFormatString(*pContext, params, 2))
+		return 0;
+
+	pawn::BroadcastTarget target;
+	if (!pawn::ReadBroadcastTarget(params[1], target))
 		return 0;
 
 	char buffer[1024];
@@ -309,7 +283,7 @@ static cell_t Native_BroadcastScreenMessage(IPluginContext *pContext, const cell
 #endif
 
 	int ret = 1;
-	bool bLocalOnly = params[1] != 0;
+	bool bLocalOnly = target == pawn::BroadcastTarget::OnlyLocal;
 	if (!bLocalOnly)
 		hltvserver->GetHLTVServer()->BroadcastEvent(msg);
 	else
@@ -324,6 +298,8 @@ static cell_t Native_BroadcastScreenMessage(IPluginContext *pContext, const cell
 static cell_t Native_BroadcastConsoleMessage(IPluginContext *pContext, const cell_t *params)
 {
 	if (hltvserver == nullptr)
+		return 0;
+	if (!HasFormatString(*pContext, params, 1))
 		return 0;
 
 	if (!g_bHasBroadcastPrintfOffset)
@@ -348,6 +324,12 @@ static cell_t Native_BroadcastChatMessage(IPluginContext *pContext, const cell_t
 {
 	if (hltvserver == nullptr)
 		return 0;
+	if (!HasFormatString(*pContext, params, 2))
+		return 0;
+
+	pawn::BroadcastTarget target;
+	if (!pawn::ReadBroadcastTarget(params[1], target))
+		return 0;
 
 	char buffer[1024];
 	size_t len;
@@ -371,7 +353,7 @@ static cell_t Native_BroadcastChatMessage(IPluginContext *pContext, const cell_t
 #endif
 
 	int ret = 1;
-	bool bLocalOnly = params[1] != 0;
+	bool bLocalOnly = target == pawn::BroadcastTarget::OnlyLocal;
 	if (!bLocalOnly)
 		hltvserver->GetHLTVServer()->BroadcastEvent(msg);
 	else
@@ -391,13 +373,14 @@ static cell_t Native_GetViewEntity(IPluginContext *pContext, const cell_t *param
 // native SourceTV_GetViewOrigin();
 static cell_t Native_GetViewOrigin(IPluginContext *pContext, const cell_t *params)
 {
-	Vector pvs = hltvdirector->GetPVSOrigin();
+	cell_t *output;
+	if (!pawn::ResolveCells(*pContext, params[1], output, 3))
+		return 0;
 
-	cell_t *addr;
-	pContext->LocalToPhysAddr(params[1], &addr);
-	addr[0] = sp_ftoc(pvs.x);
-	addr[1] = sp_ftoc(pvs.y);
-	addr[2] = sp_ftoc(pvs.z);
+	const Vector origin = hltvdirector->GetPVSOrigin();
+	output[0] = pawn::FloatCell(origin.x);
+	output[1] = pawn::FloatCell(origin.y);
+	output[2] = pawn::FloatCell(origin.z);
 	return 0;
 }
 
@@ -407,6 +390,21 @@ static cell_t Native_ForceFixedCameraShot(IPluginContext *pContext, const cell_t
 	if (hltvserver == nullptr)
 		return 0;
 
+	cell_t *pos, *angle;
+	if (!pawn::ResolveCells(*pContext, params[1], pos, 3)
+		|| !pawn::ResolveCells(*pContext, params[2], angle, 3))
+		return 0;
+
+	const Vector vPos(pawn::ReadFloat(pos[0]), pawn::ReadFloat(pos[1]), pawn::ReadFloat(pos[2]));
+	const float theta = pawn::ReadFloat(angle[0]);
+	const float phi = pawn::ReadFloat(angle[1]);
+	const float fov = pawn::ReadFloat(params[4]);
+	const float duration = pawn::ReadFloat(params[5]);
+	if (!pawn::FitsInt(vPos.x) || !pawn::FitsInt(vPos.y) || !pawn::FitsInt(vPos.z)
+		|| !pawn::FitsInt(theta) || !pawn::FitsInt(phi) || !std::isfinite(fov)
+		|| !std::isfinite(duration))
+		return 0;
+
 	// Validate entities.
 	if (params[3] != 0 && !gamehelpers->ReferenceToEntity(params[3]))
 	{
@@ -414,15 +412,12 @@ static cell_t Native_ForceFixedCameraShot(IPluginContext *pContext, const cell_t
 		return 0;
 	}
 
-	cell_t *pos;
-	pContext->LocalToPhysAddr(params[1], &pos);
-
-	cell_t *angle;
-	pContext->LocalToPhysAddr(params[2], &angle);
+	int nextTick;
+	if (!pawn::NextThinkTick(duration, gpGlobals->interval_per_tick, hltvdirector->GetDirectorTick(), nextTick))
+		return 0;
 
 	// Update director state like it would do itself.
 	g_HLTVDirectorWrapper.SetPVSEntity(0);
-	Vector vPos(sp_ctof(pos[0]), sp_ctof(pos[1]), sp_ctof(pos[2]));
 	g_HLTVDirectorWrapper.SetPVSOrigin(vPos);
 
 	IGameEvent *shot = gameevents->CreateEvent("hltv_fixed", true);
@@ -432,16 +427,17 @@ static cell_t Native_ForceFixedCameraShot(IPluginContext *pContext, const cell_t
 	shot->SetInt("posx", vPos.x);
 	shot->SetInt("posy", vPos.y);
 	shot->SetInt("posz", vPos.z);
-	shot->SetInt("theta", sp_ctof(angle[0]));
-	shot->SetInt("phi", sp_ctof(angle[1]));
+	shot->SetInt("theta", theta);
+	shot->SetInt("phi", phi);
 	shot->SetInt("target", params[3] ? gamehelpers->ReferenceToIndex(params[3]) : DIRECTOR_NO_TARGET);
-	shot->SetFloat("fov", sp_ctof(params[4]));
+	shot->SetFloat("fov", fov);
 
 	hltvserver->GetHLTVServer()->BroadcastEvent(shot);
 	gameevents->FreeEvent(shot);
 
 	// Prevent auto director from changing shots until we allow it to again.
-	g_HLTVDirectorWrapper.SetNextThinkTick(hltvdirector->GetDirectorTick() + TIME_TO_TICKS(sp_ctof(params[5])));
+	if (pawn::NextThinkTick(duration, gpGlobals->interval_per_tick, hltvdirector->GetDirectorTick(), nextTick))
+		g_HLTVDirectorWrapper.SetNextThinkTick(nextTick);
 
 	return 1;
 }
@@ -450,6 +446,10 @@ static cell_t Native_ForceFixedCameraShot(IPluginContext *pContext, const cell_t
 static cell_t Native_ForceChaseCameraShot(IPluginContext *pContext, const cell_t *params)
 {
 	if (hltvserver == nullptr)
+		return 0;
+
+	const float duration = pawn::ReadFloat(params[7]);
+	if (!std::isfinite(duration))
 		return 0;
 
 	// Validate entities.
@@ -464,6 +464,10 @@ static cell_t Native_ForceChaseCameraShot(IPluginContext *pContext, const cell_t
 		pContext->ReportError("Invalid target2 (%d - %d)", gamehelpers->ReferenceToIndex(params[2]), params[2]);
 		return 0;
 	}
+
+	int nextTick;
+	if (!pawn::NextThinkTick(duration, gpGlobals->interval_per_tick, hltvdirector->GetDirectorTick(), nextTick))
+		return 0;
 
 	IGameEvent *shot = gameevents->CreateEvent("hltv_chase", true);
 	if (!shot)
@@ -483,7 +487,8 @@ static cell_t Native_ForceChaseCameraShot(IPluginContext *pContext, const cell_t
 	gameevents->FreeEvent(shot);
 
 	// Prevent auto director from changing shots until we allow it to again.
-	g_HLTVDirectorWrapper.SetNextThinkTick(hltvdirector->GetDirectorTick() + TIME_TO_TICKS(sp_ctof(params[7])));
+	if (pawn::NextThinkTick(duration, gpGlobals->interval_per_tick, hltvdirector->GetDirectorTick(), nextTick))
+		g_HLTVDirectorWrapper.SetNextThinkTick(nextTick);
 
 	return 1;
 }
@@ -496,228 +501,150 @@ static cell_t Native_IsRecording(IPluginContext *pContext, const cell_t *params)
 	return hltvserver->GetDemoRecorder()->IsRecording();
 }
 
-// Checks in COM_IsValidPath in the engine
-static bool IsValidPath(const char *path)
-{
-	return strlen(path) > 0 && !strstr(path, "\\\\") && !strstr(path, ":") && !strstr(path, "..") && !strstr(path, "\n") && !strstr(path, "\r");
-}
+namespace {
 
-// native bool:SourceTV_StartRecording(const String:sFilename[]);
-static cell_t Native_StartRecording(IPluginContext *pContext, const cell_t *params)
-{
-	if (hltvserver == nullptr)
-		return 0;
+struct RecorderPort {
+	HLTVServerWrapper* wrapper;
+	IDemoRecorder* recorder;
 
-	// SourceTV is not active.
-	if (!hltvserver->GetBaseServer()->IsActive())
-		return 0;
+	bool IsActive() const { return wrapper->GetBaseServer()->IsActive(); }
+	bool IsMaster() const { return wrapper->GetHLTVServer()->IsMasterProxy(); }
+	bool IsRecording() const { return recorder->IsRecording(); }
+	const char* FileName() const { return wrapper->GetDemoFileName(); }
+	int Instance() const { return wrapper->GetInstanceNumber(); }
+	int Tick() const { return recorder->GetRecordingTick(); }
+	bool Equal(const char* left, const char* right) const { return stricmp(left, right) == 0; }
 
-	// Only SourceTV Master can record demos instantly
-	if (!hltvserver->GetHLTVServer()->IsMasterProxy())
-		return 0;
-	
-	// Failed to find the IDemoRecorder instance
-	if (!hltvserver->GetDemoRecorder())
-		return 0;
-
-	// already recording
-	if (hltvserver->GetDemoRecorder()->IsRecording())
-		return 0;
-
-	char *pFile;
-	if (pContext->LocalToString(params[1], &pFile) != SP_ERROR_NONE)
-		return 0;
-	
-	// Invalid path.
-	if (!IsValidPath(pFile))
-		return 0;
-
-	// Make sure there is a '.dem' suffix
-	char pPath[PLATFORM_MAX_PATH];
-	size_t len = strlen(pFile);
-	const char *ext = libsys->GetFileExtension(pFile);
-	if (!ext || stricmp(ext, "dem") != 0)
-		ext = ".dem";
-	else
-		ext = "";
-	smutils->Format(pPath, sizeof(pPath), "%s%s", pFile, ext);
-
-#if SOURCE_ENGINE == SE_CSGO
-	if (hltvdirector->GetHLTVServerCount() > 1)
+	bool HasDemoSuffix(const char* path) const
 	{
-		for (int i = 0; i < hltvdirector->GetHLTVServerCount(); i++)
-		{
-			IHLTVServer *otherserver = hltvdirector->GetHLTVServer(i);
-			if (!otherserver->IsRecording())
-				continue;
-			
-			// Cannot record. another SourceTV is currently recording into that file.
-			if (!stricmp(pPath, otherserver->GetRecordingDemoFilename()))
-				return 0;
-		}
+		const char* ext = libsys->GetFileExtension(path);
+		return ext && Equal(ext, "dem");
 	}
-#endif
 
-	hltvserver->GetDemoRecorder()->StartRecording(pPath, false);
-	IDemoRecorder *recorder = hltvserver->GetDemoRecorder();
-	if (!recorder->IsRecording())
-		return 0;
-	const char *actualPath = hltvserver->GetDemoFileName();
-	if (!actualPath || stricmp(actualPath, pPath) != 0)
+	bool CanUsePath(const char* path) const
+	{
+#if SOURCE_ENGINE == SE_CSGO
+		if (hltvdirector->GetHLTVServerCount() > 1) {
+			for (int i = 0; i < hltvdirector->GetHLTVServerCount(); ++i) {
+				auto* server = hltvdirector->GetHLTVServer(i);
+				if (server->IsRecording() && Equal(path, server->GetRecordingDemoFilename()))
+					return false;
+			}
+		}
+#endif
+		return true;
+	}
+
+	void Start(const char* path, bool continuous) const { recorder->StartRecording(path, continuous); }
+	void Stop() const
 	{
 #if SOURCE_ENGINE == SE_CSGO
 		recorder->StopRecording(NULL);
 #else
 		recorder->StopRecording();
 #endif
-		return 0;
 	}
-	return 1;
+};
+
+RecorderPort SelectedRecorder()
+{
+	auto* wrapper = hltvserver;
+	return {wrapper, wrapper ? wrapper->GetDemoRecorder() : nullptr};
+}
+
+recording::Plugin Caller(IPluginContext* context)
+{
+	IPlugin* plugin = plsys->FindPluginByContext(context->GetContext());
+	return {plugin, plugin ? plugin->GetSerial() : 0};
+}
+
+} // namespace
+
+static cell_t Native_StartRecording(IPluginContext *pContext, const cell_t *params)
+{
+	const char *filename;
+	if (!pawn::ReadString(*pContext, params[1], filename))
+		return 0;
+
+	auto port = SelectedRecorder();
+	char path[PLATFORM_MAX_PATH];
+	return recording::Start(g_pSTVForwards.RecordingSessions(), port, port.recorder, {}, false,
+		false, filename, path, sizeof(path)).result == recording::StartResult::Started;
 }
 
 static cell_t Native_StartRecordingEx(IPluginContext *pContext, const cell_t *params)
 {
 	cell_t *ownerTokenOutput;
-	pContext->LocalToPhysAddr(params[3], &ownerTokenOutput);
+	const char *filename;
+	if (!pawn::ResolveCells(*pContext, params[3], ownerTokenOutput)
+		|| !pawn::ReadString(*pContext, params[1], filename))
+		return static_cast<cell_t>(recording::StartResult::InvalidPath);
 	*ownerTokenOutput = 0;
-	if (hltvserver == nullptr || !hltvserver->GetDemoRecorder())
-		return 1; // RecorderUnavailable
-	if (!hltvserver->GetBaseServer()->IsActive())
-		return 2; // ServerInactive
-	if (!hltvserver->GetHLTVServer()->IsMasterProxy())
-		return 3; // NotMaster
-	IDemoRecorder *recorder = hltvserver->GetDemoRecorder();
-	if (recorder->IsRecording())
-		return 4; // AlreadyRecording
 
-	char *filename;
-	if (pContext->LocalToString(params[1], &filename) != SP_ERROR_NONE || !IsValidPath(filename))
-		return 5; // InvalidPath
+	auto port = SelectedRecorder();
 	char path[PLATFORM_MAX_PATH];
-	size_t length = strlen(filename);
-	const char *extension = libsys->GetFileExtension(filename);
-	if (!extension || stricmp(extension, "dem") != 0)
-		extension = ".dem";
-	else
-		extension = "";
-	if (length + strlen(extension) >= sizeof(path))
-		return 5; // InvalidPath
-	smutils->Format(path, sizeof(path), "%s%s", filename, extension);
-
-#if SOURCE_ENGINE == SE_CSGO
-	if (hltvdirector->GetHLTVServerCount() > 1)
-	{
-		for (int i = 0; i < hltvdirector->GetHLTVServerCount(); i++)
-		{
-			IHLTVServer *other = hltvdirector->GetHLTVServer(i);
-			if (other->IsRecording() && !stricmp(path, other->GetRecordingDemoFilename()))
-				return 5;
-		}
-	}
-#endif
-
-	IPlugin *plugin = plsys->FindPluginByContext(pContext->GetContext());
-	cell_t token = g_pSTVForwards.CreateRecordingOwner(plugin, recorder);
-	if (token == 0)
-		return 7; // OwnerTokenUnavailable
-	recorder->StartRecording(path, params[2] != 0);
-	const char *actualPath = hltvserver->GetDemoFileName();
-	if (!recorder->IsRecording() || !actualPath || stricmp(actualPath, path) != 0)
-	{
-		if (recorder->IsRecording())
-		{
-#if SOURCE_ENGINE == SE_CSGO
-			recorder->StopRecording(NULL);
-#else
-			recorder->StopRecording();
-#endif
-		}
-		g_pSTVForwards.ClearRecordingOwner(recorder);
-		return 6; // StartFailed
-	}
-	*ownerTokenOutput = token;
-	return 0; // Started
+	const auto result = recording::Start(g_pSTVForwards.RecordingSessions(), port, port.recorder,
+		Caller(pContext), true, params[2] != 0, filename, path, sizeof(path));
+	*ownerTokenOutput = result.token;
+	return static_cast<cell_t>(result.result);
 }
 
 static cell_t Native_StopOwnedRecording(IPluginContext *pContext, const cell_t *params)
 {
-	if (!hltvserver || !hltvserver->GetDemoRecorder())
-		return 0;
-	IDemoRecorder *recorder = hltvserver->GetDemoRecorder();
-	IPlugin *plugin = plsys->FindPluginByContext(pContext->GetContext());
-	if (!g_pSTVForwards.IsRecordingOwner(plugin, recorder, params[1]) || !recorder->IsRecording())
-		return 0;
-#if SOURCE_ENGINE == SE_CSGO
-	recorder->StopRecording(NULL);
-#else
-	recorder->StopRecording();
-#endif
-	return !recorder->IsRecording();
+	auto port = SelectedRecorder();
+	return recording::Stop(g_pSTVForwards.RecordingSessions(), port, port.recorder, Caller(pContext), params[1], true);
 }
 
 static cell_t Native_GetRecordingSnapshot(IPluginContext *pContext, const cell_t *params)
 {
 	cell_t *recording, *ownerToken, *instance, *tick;
-	pContext->LocalToPhysAddr(params[1], &recording);
-	pContext->LocalToPhysAddr(params[2], &ownerToken);
-	pContext->LocalToPhysAddr(params[3], &instance);
-	pContext->LocalToPhysAddr(params[6], &tick);
+	const cell_t capacity = params[5];
+	char *filename = nullptr;
+	if (!pawn::ResolveCells(*pContext, params[1], recording)
+		|| !pawn::ResolveCells(*pContext, params[2], ownerToken)
+		|| !pawn::ResolveCells(*pContext, params[3], instance)
+		|| !pawn::ResolveCells(*pContext, params[6], tick)
+		|| capacity < 0
+		|| (capacity > 0 && !pawn::ResolveBuffer(*pContext, params[4], capacity, filename)))
+		return 0;
+
+	auto port = SelectedRecorder();
+	const auto status = recording::ReadStatus(g_pSTVForwards.RecordingSessions(), port, port.recorder,
+		Caller(pContext), filename != nullptr);
+	if (filename && !pawn::WriteString(*pContext, params[4], capacity, filename, status.current.filename.c_str()))
+		return 0;
+
 	*recording = 0;
 	*ownerToken = 0;
 	*instance = -1;
 	*tick = -1;
-	if (params[5] > 0)
-		CopyStringToPlugin(pContext, params[4], params[5], "");
-	if (!hltvserver || !hltvserver->GetDemoRecorder())
+	if (!status.available)
 		return 0;
-	IDemoRecorder *recorder = hltvserver->GetDemoRecorder();
-	*instance = hltvserver->GetInstanceNumber();
-	if (!recorder->IsRecording())
-		return 1;
-	const char *path = hltvserver->GetDemoFileName();
-	if (path && params[5] > 0)
-		CopyStringToPlugin(pContext, params[4], params[5], path);
-	*recording = 1;
-	cell_t activeOwnerToken = g_pSTVForwards.GetRecordingOwnerToken(recorder);
-	IPlugin *plugin = plsys->FindPluginByContext(pContext->GetContext());
-	if (g_pSTVForwards.IsRecordingOwner(plugin, recorder, activeOwnerToken))
-		*ownerToken = activeOwnerToken;
-	*tick = recorder->GetRecordingTick();
+	*instance = status.current.instance;
+	if (status.current.active)
+	{
+		*recording = 1;
+		if (status.token != 0)
+			*ownerToken = status.token;
+		*tick = status.current.tick;
+	}
 	return 1;
 }
 
 // native bool:SourceTV_StopRecording();
 static cell_t Native_StopRecording(IPluginContext *pContext, const cell_t *params)
 {
-	if (hltvserver == nullptr)
-		return 0;
-
-	// Failed to find the IDemoRecorder instance
-	if (!hltvserver->GetDemoRecorder())
-		return 0;
-
-	// Not recording
-	if (!hltvserver->GetDemoRecorder()->IsRecording())
-		return 0;
-	IDemoRecorder *recorder = hltvserver->GetDemoRecorder();
-	cell_t ownerToken = g_pSTVForwards.GetRecordingOwnerToken(recorder);
-	IPlugin *plugin = plsys->FindPluginByContext(pContext->GetContext());
-	if (ownerToken != 0 && !g_pSTVForwards.IsRecordingOwner(plugin, recorder, ownerToken))
-		return 0;
-
-#if SOURCE_ENGINE == SE_CSGO
-	recorder->StopRecording(NULL);
-	// TODO: Stop recording on all other active hltvservers (tv_stoprecord in csgo does this)
-#else
-	recorder->StopRecording();
-#endif
-
-	return 1;
+	auto port = SelectedRecorder();
+	return recording::Stop(g_pSTVForwards.RecordingSessions(), port, port.recorder, Caller(pContext), 0, false);
 }
 
 // native bool:SourceTV_GetDemoFileName(String:sFilename[], maxlen);
 static cell_t Native_GetDemoFileName(IPluginContext *pContext, const cell_t *params)
 {
+	char *destination;
+	if (!pawn::ResolveBuffer(*pContext, params[1], params[2], destination))
+		return 0;
+
 	if (hltvserver == nullptr)
 		return 0;
 
@@ -733,7 +660,7 @@ static cell_t Native_GetDemoFileName(IPluginContext *pContext, const cell_t *par
 	if (!pDemoFile)
 		return 0;
 
-	return CopyStringToPlugin(pContext, params[1], params[2], pDemoFile);
+	return pawn::WriteString(*pContext, params[1], params[2], destination, pDemoFile);
 }
 
 // native SourceTV_GetRecordingTick();
@@ -756,6 +683,8 @@ static cell_t Native_GetRecordingTick(IPluginContext *pContext, const cell_t *pa
 static cell_t Native_PrintToDemoConsole(IPluginContext *pContext, const cell_t *params)
 {
 	if (hltvserver == nullptr)
+		return 0;
+	if (!HasFormatString(*pContext, params, 1))
 		return 0;
 
 	if (!iserver)
@@ -850,6 +779,10 @@ static cell_t Native_IsClientProxy(IPluginContext *pContext, const cell_t *param
 // native SourceTV_GetClientName(client, String:name[], maxlen);
 static cell_t Native_GetClientName(IPluginContext *pContext, const cell_t *params)
 {
+	char *destination;
+	if (!pawn::ResolveBuffer(*pContext, params[2], params[3], destination))
+		return 0;
+
 	if (hltvserver == nullptr)
 		return 0;
 
@@ -867,13 +800,17 @@ static cell_t Native_GetClientName(IPluginContext *pContext, const cell_t *param
 		return 0;
 	}
 	
-	CopyStringToPlugin(pContext, params[2], params[3], pClient->Name());
+	pawn::WriteString(*pContext, params[2], params[3], destination, pClient->Name());
 	return 0;
 }
 
 // native SourceTV_GetClientIP(client, String:ip[], maxlen);
 static cell_t Native_GetClientIP(IPluginContext *pContext, const cell_t *params)
 {
+	char *destination;
+	if (!pawn::ResolveBuffer(*pContext, params[2], params[3], destination))
+		return 0;
+
 	if (hltvserver == nullptr)
 		return 0;
 
@@ -891,13 +828,17 @@ static cell_t Native_GetClientIP(IPluginContext *pContext, const cell_t *params)
 		return 0;
 	}
 
-	CopyStringToPlugin(pContext, params[2], params[3], pClient->Ip());
+	pawn::WriteString(*pContext, params[2], params[3], destination, pClient->Ip());
 	return 0;
 }
 
 // native SourceTV_GetClientPassword(client, String:password[], maxlen);
 static cell_t Native_GetClientPassword(IPluginContext *pContext, const cell_t *params)
 {
+	char *destination;
+	if (!pawn::ResolveBuffer(*pContext, params[2], params[3], destination))
+		return 0;
+
 	if (hltvserver == nullptr)
 		return 0;
 
@@ -915,13 +856,17 @@ static cell_t Native_GetClientPassword(IPluginContext *pContext, const cell_t *p
 		return 0;
 	}
 
-	CopyStringToPlugin(pContext, params[2], params[3], pClient->Password());
+	pawn::WriteString(*pContext, params[2], params[3], destination, pClient->Password());
 	return 0;
 }
 
 // native SourceTV_KickClient(client, const String:sReason[]);
 static cell_t Native_KickClient(IPluginContext *pContext, const cell_t *params)
 {
+	const char *pReason;
+	if (!pawn::ReadString(*pContext, params[2], pReason))
+		return 0;
+
 	if (hltvserver == nullptr)
 		return 0;
 
@@ -938,10 +883,6 @@ static cell_t Native_KickClient(IPluginContext *pContext, const cell_t *params)
 		pContext->ReportError("Client %d is not connected.", client);
 		return 0;
 	}
-
-	char *pReason;
-	if (pContext->LocalToString(params[2], &pReason) != SP_ERROR_NONE)
-		return 0;
 
 	pClient->Kick(pReason);
 	return 0;
@@ -951,6 +892,8 @@ static cell_t Native_KickClient(IPluginContext *pContext, const cell_t *params)
 static cell_t Native_PrintToChat(IPluginContext *pContext, const cell_t *params)
 {
 	if (hltvserver == nullptr)
+		return 0;
+	if (!HasFormatString(*pContext, params, 2))
 		return 0;
 
 	cell_t client = params[1];
@@ -1022,6 +965,8 @@ static cell_t Native_PrintToConsole(IPluginContext *pContext, const cell_t *para
 {
 	if (hltvserver == nullptr)
 		return 0;
+	if (!HasFormatString(*pContext, params, 2))
+		return 0;
 
 	cell_t client = params[1];
 	if (client < 1 || client > hltvserver->GetBaseServer()->GetClientCount())
@@ -1072,6 +1017,8 @@ static cell_t Native_PrintToConsole(IPluginContext *pContext, const cell_t *para
 static cell_t Native_SetClientTVTitle(IPluginContext *pContext, const cell_t *params)
 {
 	if (hltvserver == nullptr)
+		return 0;
+	if (!HasFormatString(*pContext, params, 2))
 		return 0;
 
 	cell_t client = params[1];

@@ -756,6 +756,15 @@
 
 		"Offsets"
 		{
+			// Byte displacement from the complete CHLTVServer to the IServer subobject.
+			// Linux x86: CHLTVServer::GetBaseServer returns this + 4.
+			// Windows: preserve the legacy displacement pending binary correlation.
+			"IServer_from_CHLTVServer"
+			{
+				"windows" "8"
+				"linux"   "4"
+			}
+
 			// String: "NetMsg"
 			"CNetChan::SendNetMsg"
 			{

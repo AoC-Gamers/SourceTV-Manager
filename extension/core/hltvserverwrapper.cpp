@@ -1,9 +1,20 @@
 #include "core/hltvserverwrapper.h"
+#include "core/hook_context.h"
 #include "hooks/forwards.h"
 #include "hooks/commonhooks.h"
 
-void *old_host_client = nullptr;
-bool g_HostClientOverridden = false;
+namespace {
+sourcetv::PointerOverrides hostOverrides;
+#if SOURCE_ENGINE != SE_CSGO
+sourcetv::PointerOverrides channelOverrides;
+struct PrintInvocation
+{
+	const HLTVServerWrapper* wrapper;
+	IClient* client;
+};
+std::vector<PrintInvocation> printInvocations;
+#endif
+}
 
 SH_DECL_MANUALHOOK0_void(CHLTVServer_Shutdown, 0, 0, 0);
 
@@ -25,41 +36,29 @@ static void *FakeNetChan = &FakeNetChanVtbl;
 SH_DECL_MANUALHOOK3(NetChan_SendNetMsg, 0, 0, 0, bool, INetMessage &, bool, bool);
 #endif // SOURCE_ENGINE != SE_CSGO
 
-HLTVServerWrapper::HLTVServerWrapper(IHLTVServer *hltvserver)
+HLTVServerWrapper::HLTVServerWrapper(IHLTVServer *server)
+	: m_BaseServer(server->GetBaseServer()),
+	  m_HLTVServer(server),
+	  m_DemoRecorder(g_HLTVServers.GetDemoRecorderPtr(server))
 {
-	m_HLTVServer = hltvserver;
-	m_DemoRecorder = g_HLTVServers.GetDemoRecorderPtr(hltvserver);
-	m_Connected = true;
-	m_LastChatClient = nullptr;
-
-	Hook();
-
-	// Inform the plugins
-	g_pSTVForwards.CallOnServerStart(hltvserver);
 }
 
-void HLTVServerWrapper::Shutdown(bool bInformPlugins)
+bool HLTVServerWrapper::BeginShutdown()
 {
-	if (!m_Connected)
-		return;
+	if (!m_Active)
+		return false;
 
-	if (bInformPlugins)
-		g_pSTVForwards.CallOnServerShutdown(m_HLTVServer);
-	g_pSTVForwards.CallOnRecorderAvailabilityChanged(GetInstanceNumber(), false);
-	g_pSTVForwards.ClearRecordingOwner(m_DemoRecorder);
+	m_Active = false;
+	if (hltvserver == this)
+		hltvserver = nullptr;
 
 	Unhook();
-
-	SetLastChatClient(nullptr);
-	SetLastChatMessage(nullptr);
-	m_HLTVServer = nullptr;
-	m_DemoRecorder = nullptr;
-	m_Connected = false;
+	return true;
 }
 
 IServer *HLTVServerWrapper::GetBaseServer()
 {
-	return m_HLTVServer->GetBaseServer();
+	return m_BaseServer;
 }
 
 IHLTVServer *HLTVServerWrapper::GetHLTVServer()
@@ -90,35 +89,6 @@ const char *HLTVServerWrapper::GetDemoFileName()
 int HLTVServerWrapper::GetInstanceNumber()
 {
 	return g_HLTVServers.GetInstanceNumber(m_HLTVServer);
-}
-
-IClient *HLTVServerWrapper::GetLastChatClient()
-{
-	return m_LastChatClient;
-}
-
-void HLTVServerWrapper::SetLastChatClient(IClient *client)
-{
-	m_LastChatClient = client;
-}
-
-const char *HLTVServerWrapper::GetLastChatMessage() const
-{
-	return m_HasLastChatMessage ? m_LastChatMessage.c_str() : nullptr;
-}
-
-void HLTVServerWrapper::SetLastChatMessage(const char *msg)
-{
-	if (msg)
-	{
-		m_LastChatMessage = msg;
-		m_HasLastChatMessage = true;
-	}
-	else
-	{
-		m_LastChatMessage.clear();
-		m_HasLastChatMessage = false;
-	}
 }
 
 HLTVClientWrapper *HLTVServerWrapper::GetClient(int index)
@@ -163,65 +133,63 @@ HLTVClientWrapper *HLTVServerWrapper::FindClient(int index) const
 
 void HLTVServerWrapper::Hook()
 {
-	if (!m_Connected)
-		return;
-
 	g_pSTVForwards.HookServer(this);
 	if (m_DemoRecorder)
 		g_pSTVForwards.HookRecorder(m_DemoRecorder);
 
 	if (g_HLTVServers.HasShutdownOffset())
-		SH_ADD_MANUALHOOK(CHLTVServer_Shutdown, m_HLTVServer->GetBaseServer(), SH_MEMBER(this, &HLTVServerWrapper::OnHLTVServerShutdown), false);
+		SH_ADD_MANUALHOOK(CHLTVServer_Shutdown, m_BaseServer, SH_MEMBER(this, &HLTVServerWrapper::OnHLTVServerShutdown), false);
 
-	if (iserver)
-	{
-		IClient *pClient = iserver->GetClient(m_HLTVServer->GetHLTVSlot());
-		if (pClient)
-		{
-			// Hook ExecuteStringCommand
-			g_pSTVCommonHooks.AddHLTVClientHook(this, pClient);
+	if (!iserver)
+		return;
+
+	const int slot = m_HLTVServer->GetHLTVSlot();
+	if (slot < 0 || slot >= iserver->GetClientCount())
+		return;
+
+	IClient *pClient = m_BotClient = iserver->GetClient(slot);
+	if (!pClient)
+		return;
+
+	g_pSTVCommonHooks.AddHLTVClientHook(this, pClient);
 #if SOURCE_ENGINE != SE_CSGO
-			SH_ADD_HOOK(IClient, ClientPrintf, pClient, SH_MEMBER(this, &HLTVServerWrapper::OnIClient_ClientPrintf_Post), false);
+	SH_ADD_HOOK(IClient, ClientPrintf, pClient, SH_MEMBER(this, &HLTVServerWrapper::OnIClient_ClientPrintf_Post), false);
 #ifndef WIN32
-			// The IClient vtable is +4 from the CBaseClient vtable due to multiple inheritance.
-			void *pGameClient = (void *)((intptr_t)pClient - 4);
-			if (g_HLTVServers.HasClientPrintfOffset())
-				SH_ADD_MANUALHOOK(CGameClient_ClientPrintf, pGameClient, SH_MEMBER(this, &HLTVServerWrapper::OnCGameClient_ClientPrintf_Post), false);
+	// The IClient vtable is +4 from the CBaseClient vtable due to multiple inheritance.
+	void *pGameClient = (void *)((intptr_t)pClient - 4);
+	if (g_HLTVServers.HasClientPrintfOffset())
+		SH_ADD_MANUALHOOK(CGameClient_ClientPrintf, pGameClient, SH_MEMBER(this, &HLTVServerWrapper::OnCGameClient_ClientPrintf_Post), false);
 #endif // !WIN32
 #endif // SOURCE_ENGINE != SE_CSGO
-		}
-	}
 }
 
 void HLTVServerWrapper::Unhook()
 {
-	if (!m_Connected)
-		return;
-
 	g_pSTVForwards.UnhookServer(this);
 	if (m_DemoRecorder)
 		g_pSTVForwards.UnhookRecorder(m_DemoRecorder);
 
 	if (g_HLTVServers.HasShutdownOffset())
-		SH_REMOVE_MANUALHOOK(CHLTVServer_Shutdown, m_HLTVServer->GetBaseServer(), SH_MEMBER(this, &HLTVServerWrapper::OnHLTVServerShutdown), false);
+		SH_REMOVE_MANUALHOOK(CHLTVServer_Shutdown, m_BaseServer, SH_MEMBER(this, &HLTVServerWrapper::OnHLTVServerShutdown), false);
 
-	if (iserver)
-	{
-		IClient *pClient = iserver->GetClient(m_HLTVServer->GetHLTVSlot());
-		if (pClient)
-		{
-			// Remove ExecuteStringCommand hook
-			g_pSTVCommonHooks.RemoveHLTVClientHook(this, pClient);
+	hostOverrides.Clear(this);
 #if SOURCE_ENGINE != SE_CSGO
-			SH_REMOVE_HOOK(IClient, ClientPrintf, pClient, SH_MEMBER(this, &HLTVServerWrapper::OnIClient_ClientPrintf_Post), false);
+	channelOverrides.Clear(this);
+#endif
+	if (IClient *pClient = m_BotClient)
+	{
+		// Remove ExecuteStringCommand hook
+		g_pSTVCommonHooks.RemoveHLTVClientHook(this, pClient);
+#if SOURCE_ENGINE != SE_CSGO
+		SH_REMOVE_HOOK(IClient, ClientPrintf, pClient, SH_MEMBER(this, &HLTVServerWrapper::OnIClient_ClientPrintf_Post), false);
 #ifndef WIN32
-			// The IClient vtable is +4 from the CBaseClient vtable due to multiple inheritance.
-			void *pGameClient = (void *)((intptr_t)pClient - 4);
-			if (g_HLTVServers.HasClientPrintfOffset())
-				SH_REMOVE_MANUALHOOK(CGameClient_ClientPrintf, pGameClient, SH_MEMBER(this, &HLTVServerWrapper::OnCGameClient_ClientPrintf_Post), false);
+		// The IClient vtable is +4 from the CBaseClient vtable due to multiple inheritance.
+		void *pGameClient = (void *)((intptr_t)pClient - 4);
+		if (g_HLTVServers.HasClientPrintfOffset())
+			SH_REMOVE_MANUALHOOK(CGameClient_ClientPrintf, pGameClient, SH_MEMBER(this, &HLTVServerWrapper::OnCGameClient_ClientPrintf_Post), false);
 #endif // !WIN32
 #endif // SOURCE_ENGINE != SE_CSGO
-		}
+		m_BotClient = nullptr;
 	}
 }
 
@@ -229,10 +197,9 @@ void HLTVServerWrapper::Unhook()
 // so RemoveHLTVServer/SetHLTVServer(NULL) is called too on the master proxy.
 void HLTVServerWrapper::OnHLTVServerShutdown()
 {
-	if (!m_Connected)
-		RETURN_META(MRES_IGNORED);
-
-	Shutdown(true);
+	const auto self = g_HLTVServers.Pin(this);
+	if (self && self->IsActive())
+		g_HLTVServers.RemoveServer(m_HLTVServer, true);
 
 	RETURN_META(MRES_IGNORED);
 }
@@ -248,37 +215,21 @@ void HLTVServerWrapper::OnHLTVServerShutdown()
 // bot and reset it to the old value after command execution.
 bool HLTVServerWrapper::OnHLTVBotExecuteStringCommand(const char *s)
 {
-	if (!host_client)
-	{
-		// Block crash in status command.
-		if (!Q_stricmp(s, "status"))
-			RETURN_META_VALUE(MRES_SUPERCEDE, 0);
-		else
-			RETURN_META_VALUE(MRES_IGNORED, 0);
-	}
+	IClient *client = META_IFACEPTR(IClient);
+	void** slot = m_Active && client ? static_cast<void**>(host_client) : nullptr;
+	// The IClient subobject is +4 from the CBaseClient subobject.
+	void* gameClient = slot ? reinterpret_cast<void*>(reinterpret_cast<intptr_t>(client) - 4) : nullptr;
+	hostOverrides.Push(this, slot, gameClient);
+	if (!slot && s && !Q_stricmp(s, "status"))
+		RETURN_META_VALUE(MRES_SUPERCEDE, false);
 
-	IClient *pClient = META_IFACEPTR(IClient);
-	if (!pClient)
-		RETURN_META_VALUE(MRES_IGNORED, 0);
-
-	// The IClient vtable is +4 from the CBaseClient vtable due to multiple inheritance.
-	void *pGameClient = (void *)((intptr_t)pClient - 4);
-
-	old_host_client = *(void **)host_client;
-	*(void **)host_client = pGameClient;
-	g_HostClientOverridden = true;
-
-	RETURN_META_VALUE(MRES_IGNORED, 0);
+	RETURN_META_VALUE(MRES_IGNORED, false);
 }
 
 bool HLTVServerWrapper::OnHLTVBotExecuteStringCommand_Post(const char *s)
 {
-	if (!host_client || !g_HostClientOverridden)
-		RETURN_META_VALUE(MRES_IGNORED, 0);
-
-	*(void **)host_client = old_host_client;
-	g_HostClientOverridden = false;
-	RETURN_META_VALUE(MRES_IGNORED, 0);
+	hostOverrides.Pop(this);
+	RETURN_META_VALUE(MRES_IGNORED, false);
 }
 
 #if SOURCE_ENGINE != SE_CSGO
@@ -305,6 +256,10 @@ void HLTVServerWrapper::OnIClient_ClientPrintf_Post(const char* buf)
 
 void HLTVServerWrapper::HandleClientPrintf(IClient *pClient, const char* buf)
 {
+	const auto self = g_HLTVServers.Pin(this);
+	if (!self || !m_Active || !pClient || !g_HLTVServers.CanRedirectPrintf())
+		return;
+
 	// Craft our own "NetChan" pointer
 	static int offset = -1;
 	if (!g_pGameConf->GetOffset("CBaseClient::m_NetChannel", &offset) || offset == -1)
@@ -318,13 +273,14 @@ void HLTVServerWrapper::HandleClientPrintf(IClient *pClient, const char* buf)
 #else
 	void *pNetChannel = (void *)((char *)pClient + offset - 4);
 #endif
-	// Set our fake netchannel
-	*(void **)pNetChannel = &FakeNetChan;
-	// Call ClientPrintf again, this time with a "Netchannel" set on the bot.
-	// This will call our own OnHLTVBotNetChanSendNetMsg function
+	PrintInvocation call{this, pClient};
+	printInvocations.push_back(call);
+	channelOverrides.Push(this, static_cast<void**>(pNetChannel), &FakeNetChan, &call);
+	const auto restore = ke::MakeScopeGuard([&] {
+		channelOverrides.Pop(this, &call);
+		printInvocations.pop_back();
+	});
 	SH_CALL(pClient, &IClient::ClientPrintf)("%s", buf);
-	// Set the fake netchannel back to 0.
-	*(void **)pNetChannel = nullptr;
 }
 #endif
 
@@ -334,7 +290,7 @@ void HLTVServerWrapper::HandleClientPrintf(IClient *pClient, const char* buf)
 void HLTVServerWrapperManager::InitHooks()
 {
 	int offset;
-	if (g_pGameConf->GetOffset("CHLTVServer::Shutdown", &offset))
+	if (g_pGameConf->GetOffset("CHLTVServer::Shutdown", &offset) && offset >= 0)
 	{
 		SH_MANUALHOOK_RECONFIGURE(CHLTVServer_Shutdown, offset, 0, 0);
 		m_bHasShutdownOffset = true;
@@ -346,7 +302,7 @@ void HLTVServerWrapperManager::InitHooks()
 
 #if SOURCE_ENGINE != SE_CSGO
 #ifndef WIN32
-	if (g_pGameConf->GetOffset("CGameClient::ClientPrintf", &offset))
+	if (g_pGameConf->GetOffset("CGameClient::ClientPrintf", &offset) && offset >= 0)
 	{
 		SH_MANUALHOOK_RECONFIGURE(CGameClient_ClientPrintf, offset, 0, 0);
 		m_bHasClientPrintfOffset = true;
@@ -359,9 +315,9 @@ void HLTVServerWrapperManager::InitHooks()
 
 	if (g_pGameConf->GetOffset("CNetChan::SendNetMsg", &offset))
 	{
-		if (offset >= FAKE_VTBL_LENGTH)
+		if (offset < 0 || offset >= FAKE_VTBL_LENGTH)
 		{
-			smutils->LogError(myself, "CNetChan::SendNetMsg offset too big. Need to raise define and recompile. Contact the author.");
+			smutils->LogError(myself, "CNetChan::SendNetMsg offset is outside the fake vtable.");
 		}
 		else
 		{
@@ -373,8 +329,8 @@ void HLTVServerWrapperManager::InitHooks()
 			// In that function we just call CGameClient::SendNetMsg with the given INetMessage to flow it through the same
 			// path as other net messages.
 			SH_MANUALHOOK_RECONFIGURE(NetChan_SendNetMsg, offset, 0, 0);
-			SH_ADD_MANUALHOOK(NetChan_SendNetMsg, &FakeNetChan, SH_MEMBER(this, &HLTVServerWrapperManager::OnHLTVBotNetChanSendNetMsg), false);
-			m_bSendNetMsgHooked = true;
+			m_bSendNetMsgHooked = SH_ADD_MANUALHOOK(NetChan_SendNetMsg, &FakeNetChan,
+				SH_MEMBER(this, &HLTVServerWrapperManager::OnHLTVBotNetChanSendNetMsg), false) != 0;
 		}
 	}
 	else
@@ -386,12 +342,6 @@ void HLTVServerWrapperManager::InitHooks()
 
 void HLTVServerWrapperManager::ShutdownHooks()
 {
-	g_pSTVForwards.RemoveBroadcastLocalChatDetour();
-#ifndef WIN32
-	g_pSTVForwards.RemoveStartRecordingDetour();
-	g_pSTVForwards.RemoveStopRecordingDetour();
-#endif
-
 #if SOURCE_ENGINE != SE_CSGO
 	if (m_bSendNetMsgHooked)
 	{
@@ -399,33 +349,76 @@ void HLTVServerWrapperManager::ShutdownHooks()
 		m_bSendNetMsgHooked = false;
 	}
 #endif
+	m_bHasClientPrintfOffset = false;
+	m_bHasShutdownOffset = false;
 }
 
-void HLTVServerWrapperManager::AddServer(IHLTVServer *hltvserver)
+ke::RefPtr<HLTVServerWrapper> HLTVServerWrapperManager::Pin(const HLTVServerWrapper *wrapper) const
 {
-	// Create the detours once the first sourcetv server is created.
+	for (const auto& candidate : m_HLTVServers) {
+		if (candidate.get() == wrapper)
+			return candidate;
+	}
+	return {};
+}
+
+void HLTVServerWrapperManager::AddServer(IHLTVServer *server)
+{
+	if (!m_AcceptServers || !server)
+		return;
+	for (const auto& existing : m_HLTVServers) {
+		if (existing->GetHLTVServer() == server)
+			return;
+	}
+
 	g_pSTVForwards.CreateBroadcastLocalChatDetour();
 #ifndef WIN32
 	g_pSTVForwards.CreateStartRecordingDetour();
 	g_pSTVForwards.CreateStopRecordingDetour();
 #endif
 
-	m_HLTVServers.emplace_back(new HLTVServerWrapper(hltvserver));
-	HLTVServerWrapper *wrapper = m_HLTVServers.back().get();
-	g_pSTVForwards.CallOnRecorderAvailabilityChanged(wrapper->GetInstanceNumber(), wrapper->GetDemoRecorder() != nullptr);
+	const auto wrapper = ke::RefPtr<HLTVServerWrapper>(new HLTVServerWrapper(server));
+	if (!wrapper->GetBaseServer())
+		return;
+	m_HLTVServers.push_back(wrapper);
+	wrapper->Hook();
+	if (!hltvserver)
+		hltvserver = wrapper.get();
+
+	g_pSTVForwards.CallOnServerStart(server);
+	if (wrapper->IsActive()) {
+		wrapper->m_AnnouncedRecorder = true;
+		g_pSTVForwards.CallOnRecorderAvailabilityChanged(wrapper->GetInstanceNumber(), wrapper->GetDemoRecorder() != nullptr);
+	}
 }
 
-void HLTVServerWrapperManager::RemoveServer(IHLTVServer *hltvserver, bool bInformPlugins)
+void HLTVServerWrapperManager::RemoveServer(IHLTVServer *server, bool informPlugins)
 {
-	for (unsigned int i = 0; i < m_HLTVServers.size(); i++)
-	{
-		HLTVServerWrapper *wrapper = m_HLTVServers[i].get();
-		if (wrapper->GetHLTVServer() != hltvserver)
-			continue;
+	const auto wrapper = Pin(GetWrapper(server));
+	if (!wrapper || !wrapper->BeginShutdown())
+		return;
 
-		wrapper->Shutdown(bInformPlugins);
-		m_HLTVServers.erase(m_HLTVServers.begin() + i);
-		break;
+	const int instance = wrapper->GetInstanceNumber();
+	if (informPlugins)
+		g_pSTVForwards.CallOnServerShutdown(server);
+	if (std::exchange(wrapper->m_AnnouncedRecorder, false) && m_AcceptServers)
+		g_pSTVForwards.CallOnRecorderAvailabilityChanged(instance, false);
+	m_HLTVServers.erase(std::remove_if(m_HLTVServers.begin(), m_HLTVServers.end(),
+		[&](const auto& candidate) { return candidate.get() == wrapper.get(); }), m_HLTVServers.end());
+}
+
+void HLTVServerWrapperManager::ShutdownServers()
+{
+	m_AcceptServers = false;
+	// Retire the registry before notifying listeners so callbacks cannot select
+	// a different wrapper that is also being unloaded.
+	auto servers = std::move(m_HLTVServers);
+	m_HLTVServers.clear();
+	for (const auto& wrapper : servers)
+		wrapper->BeginShutdown();
+	for (const auto& wrapper : servers) {
+		if (std::exchange(wrapper->m_AnnouncedRecorder, false))
+			g_pSTVForwards.CallOnRecorderAvailabilityChanged(wrapper->GetInstanceNumber(), false);
 	}
 }
 
@@ -434,7 +427,7 @@ HLTVServerWrapper *HLTVServerWrapperManager::GetWrapper(IHLTVServer *hltvserver)
 	for (unsigned int i = 0; i < m_HLTVServers.size(); i++)
 	{
 		HLTVServerWrapper *wrapper = m_HLTVServers[i].get();
-		if (wrapper->GetHLTVServer() == hltvserver)
+		if (wrapper->IsActive() && wrapper->GetHLTVServer() == hltvserver)
 			return wrapper;
 	}
 	return nullptr;
@@ -445,7 +438,7 @@ HLTVServerWrapper *HLTVServerWrapperManager::GetWrapper(IServer *server)
 	for (unsigned int i = 0; i < m_HLTVServers.size(); i++)
 	{
 		HLTVServerWrapper *wrapper = m_HLTVServers[i].get();
-		if (wrapper->GetBaseServer() == server)
+		if (wrapper->IsActive() && wrapper->GetBaseServer() == server)
 			return wrapper;
 	}
 	return nullptr;
@@ -456,7 +449,7 @@ HLTVServerWrapper *HLTVServerWrapperManager::GetWrapper(IDemoRecorder *demorecor
 	for (unsigned int i = 0; i < m_HLTVServers.size(); i++)
 	{
 		HLTVServerWrapper *wrapper = m_HLTVServers[i].get();
-		if (wrapper->GetDemoRecorder() != nullptr && wrapper->GetDemoRecorder() == demorecorder)
+		if (wrapper->IsActive() && wrapper->GetDemoRecorder() != nullptr && wrapper->GetDemoRecorder() == demorecorder)
 			return wrapper;
 	}
 	return nullptr;
@@ -533,8 +526,10 @@ bool HLTVServerWrapperManager::HasClientPrintfOffset()
 #if SOURCE_ENGINE != SE_CSGO
 bool HLTVServerWrapperManager::OnHLTVBotNetChanSendNetMsg(INetMessage &msg, bool bForceReliable, bool bVoice)
 {
-	// No need to worry about the right selected hltvserver, because there can only be one.
-	IClient *pClient = iserver->GetClient(hltvserver->GetHLTVServer()->GetHLTVSlot());
+	if (printInvocations.empty() || !printInvocations.back().wrapper->IsActive())
+		RETURN_META_VALUE(MRES_SUPERCEDE, false);
+
+	IClient *pClient = printInvocations.back().client;
 	if (!pClient)
 		RETURN_META_VALUE(MRES_SUPERCEDE, false);
 

@@ -12,6 +12,7 @@ sourceFiles = [
   'core/hltvserverwrapper.cpp',
   'core/hltvdirectorwrapper.cpp',
   'core/hltvclientwrapper.cpp',
+  'core/local_hltv_broadcast.cpp',
 ]
 
 # SM 1.10+ compilation changes

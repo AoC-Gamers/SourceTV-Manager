@@ -64,14 +64,14 @@ void CCommonHooks::Init()
 void CCommonHooks::AddSpectatorHook(CForwardManager *fwdmgr, IClient *client)
 {
 	SH_ADD_HOOK(IClient, ExecuteStringCommand, client, SH_MEMBER(fwdmgr, &CForwardManager::IClient_OnSpectatorExecuteStringCommand), false);
-	SH_ADD_HOOK(IClient, ExecuteStringCommand, client, SH_MEMBER(fwdmgr, &CForwardManager::OnSpectatorExecuteStringCommand_Post), true);
+	SH_ADD_HOOK(IClient, ExecuteStringCommand, client, SH_MEMBER(fwdmgr, &CForwardManager::IClient_OnSpectatorExecuteStringCommand_Post), true);
 
 #if NEED_EXECUTESTRINGCMD_CBASECLIENT
 	void *pGameClient = (void *)((intptr_t)client - 4);
 	if (m_bHasExecuteStringCommandOffset)
 	{
 		SH_ADD_MANUALHOOK(CBaseClient_ExecuteStringCommand, pGameClient, SH_MEMBER(fwdmgr, &CForwardManager::BaseClient_OnSpectatorExecuteStringCommand), false);
-		SH_ADD_MANUALHOOK(CBaseClient_ExecuteStringCommand, pGameClient, SH_MEMBER(fwdmgr, &CForwardManager::OnSpectatorExecuteStringCommand_Post), true);
+		SH_ADD_MANUALHOOK(CBaseClient_ExecuteStringCommand, pGameClient, SH_MEMBER(fwdmgr, &CForwardManager::BaseClient_OnSpectatorExecuteStringCommand_Post), true);
 	}
 #endif
 }
@@ -79,14 +79,14 @@ void CCommonHooks::AddSpectatorHook(CForwardManager *fwdmgr, IClient *client)
 void CCommonHooks::RemoveSpectatorHook(CForwardManager *fwdmgr, IClient *client)
 {
 	SH_REMOVE_HOOK(IClient, ExecuteStringCommand, client, SH_MEMBER(fwdmgr, &CForwardManager::IClient_OnSpectatorExecuteStringCommand), false);
-	SH_REMOVE_HOOK(IClient, ExecuteStringCommand, client, SH_MEMBER(fwdmgr, &CForwardManager::OnSpectatorExecuteStringCommand_Post), true);
+	SH_REMOVE_HOOK(IClient, ExecuteStringCommand, client, SH_MEMBER(fwdmgr, &CForwardManager::IClient_OnSpectatorExecuteStringCommand_Post), true);
 
 #if NEED_EXECUTESTRINGCMD_CBASECLIENT
 	void *pGameClient = (void *)((intptr_t)client - 4);
 	if (m_bHasExecuteStringCommandOffset)
 	{
 		SH_REMOVE_MANUALHOOK(CBaseClient_ExecuteStringCommand, pGameClient, SH_MEMBER(fwdmgr, &CForwardManager::BaseClient_OnSpectatorExecuteStringCommand), false);
-		SH_REMOVE_MANUALHOOK(CBaseClient_ExecuteStringCommand, pGameClient, SH_MEMBER(fwdmgr, &CForwardManager::OnSpectatorExecuteStringCommand_Post), true);
+		SH_REMOVE_MANUALHOOK(CBaseClient_ExecuteStringCommand, pGameClient, SH_MEMBER(fwdmgr, &CForwardManager::BaseClient_OnSpectatorExecuteStringCommand_Post), true);
 	}
 #endif
 }

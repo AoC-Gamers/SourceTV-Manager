@@ -102,6 +102,8 @@ public:
 	 * @return			True if working, false otherwise.
 	 */
 	virtual bool QueryRunning(char *error, size_t maxlength);
+
+	void NotifyInterfaceDrop(SMInterface *interface) override;
 public:
 #if defined SMEXT_CONF_METAMOD
 	/**
@@ -143,6 +145,7 @@ public:
 	void SelectSourceTVServer(IHLTVServer *hltv);
 
 private:
+	bool m_DirectorHooksInstalled = false;
 #if SOURCE_ENGINE == SE_CSGO
 	void OnAddHLTVServer_Post(IHLTVServer *hltv);
 	void OnRemoveHLTVServer(IHLTVServer *hltv);

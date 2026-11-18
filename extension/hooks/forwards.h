@@ -32,9 +32,13 @@
 #ifndef _INCLUDE_SOURCEMOD_EXTENSION_FORWARDS_H_
 #define _INCLUDE_SOURCEMOD_EXTENSION_FORWARDS_H_
 
+#include "core/recording_sessions.h"
+#include "core/hook_context.h"
 #include "extension.h"
 #include <string>
 #include <unordered_map>
+#include <optional>
+#include <vector>
 
 #if SOURCE_ENGINE == SE_CSGO
 #include "netmessages.pb.h"
@@ -84,26 +88,28 @@ public:
 
 	void CallOnStartRecording(IDemoRecorder *recorder, const char *filename, bool bContinuously);
 	void CaptureRecordingStartState(IDemoRecorder *recorder);
-	void CallOnStopRecording(IDemoRecorder *recorder);
+	bool CallOnStopRecording(IDemoRecorder *recorder);
 	void CallOnRecordingFileClosed(IDemoRecorder *recorder);
 	void CallOnRecorderAvailabilityChanged(int instance, bool available);
-	cell_t CreateRecordingOwner(IPlugin *plugin, IDemoRecorder *recorder);
-	bool IsRecordingOwner(IPlugin *plugin, IDemoRecorder *recorder, cell_t token);
-	void ClearRecordingOwner(IDemoRecorder *recorder);
-	cell_t GetRecordingOwnerToken(IDemoRecorder *recorder);
+	sourcetv::recording::Sessions& RecordingSessions() { return m_RecordingSessions; }
 
-	bool CallOnSpectatorChatMessage(HLTVServerWrapper *server, char *msg, int msglen, char *chatgroup, int grouplen);
-	void CallOnSpectatorChatMessage_Post(HLTVServerWrapper *server, const char *msg, const char *chatgroup);
+	bool CallOnSpectatorChatMessage(int clientIndex, char *msg, int msglen, char *chatgroup, int grouplen);
+	void CallOnSpectatorChatMessage_Post(int clientIndex, const char *msg, const char *chatgroup);
 	bool HasSpectatorChatListeners();
+	std::optional<sourcetv::ChatMessage> CurrentChat(const HLTVServerWrapper *server) const
+	{
+		return m_Commands.Current(server);
+	}
 
 	bool BaseClient_OnSpectatorExecuteStringCommand(const char *s);
 	bool IClient_OnSpectatorExecuteStringCommand(const char *s);
-	bool OnSpectatorExecuteStringCommand_Post(const char *s);
+	bool IClient_OnSpectatorExecuteStringCommand_Post(const char *s);
+	bool BaseClient_OnSpectatorExecuteStringCommand_Post(const char *s);
 	void CreateBroadcastLocalChatDetour();
 	void RemoveBroadcastLocalChatDetour();
 
 private:
-	void HookClient(IClient *client);
+	void HookClient(HLTVServerWrapper *owner, IClient *client);
 	void UnhookClient(IClient *client);
 
 private:
@@ -133,34 +139,15 @@ private:
 	void HandleSpectatorExecuteStringCommand(IClient *client, const char *s);
 
 private:
+	sourcetv::SpectatorCommands m_Commands;
+	std::unordered_map<IClient*, HLTVServerWrapper*> m_HookedClients;
+	bool m_Initialized = false;
 	IForward *m_StartRecordingFwd;
 	IForward *m_StopRecordingFwd;
 	IForward *m_RecordingFileStartedFwd;
 	IForward *m_RecordingFileClosedFwd;
 	IForward *m_RecorderAvailabilityChangedFwd;
-	struct PendingRecordingClose
-	{
-		int instance;
-		int tick;
-		std::string filename;
-	};
-	struct PendingRecordingStart
-	{
-		bool wasRecording;
-		std::string filename;
-	};
-	struct RecordingOwner
-	{
-		IPlugin *plugin;
-		unsigned int pluginSerial;
-		IDemoRecorder *recorder;
-		cell_t token;
-	};
-	std::unordered_map<IDemoRecorder *, PendingRecordingClose> m_PendingRecordingCloses;
-	std::unordered_map<IDemoRecorder *, PendingRecordingStart> m_PendingRecordingStarts;
-	RecordingOwner m_RecordingOwner = { nullptr, 0, nullptr, 0 };
-	cell_t m_NextRecordingOwnerToken = 1;
-	bool m_bRecordingOwnerTokensExhausted = false;
+	sourcetv::recording::Sessions m_RecordingSessions;
 	IForward *m_SpectatorPreConnectFwd;
 	IForward *m_SpectatorConnectedFwd;
 	IForward *m_SpectatorDisconnectFwd;

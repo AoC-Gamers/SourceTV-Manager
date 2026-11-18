@@ -30,9 +30,12 @@
 */
 
 #include "extension.h"
+#include "core/local_hltv_broadcast.h"
 #include "hooks/forwards.h"
+#include "hooks/manual_recall.h"
 #include <climits>
 #include "core/hltvserverwrapper.h"
+#include "core/hook_context.h"
 #include "hooks/commonhooks.h"
 
 CForwardManager g_pSTVForwards;
@@ -78,9 +81,13 @@ SH_DECL_MANUALHOOK1(CHLTVServer_GetChallengeType, 0, 0, 0, int, const netadr_t &
 
 void CForwardManager::Init()
 {
+	if (m_Initialized)
+		return;
+
+	m_Initialized = true;
 	plsys->AddPluginsListener(this);
 	int offset = -1;
-	if (!g_pGameConf->GetOffset("CHLTVServer::ConnectClient", &offset) || offset == -1)
+	if (!g_pGameConf->GetOffset("CHLTVServer::ConnectClient", &offset) || offset < 0)
 	{
 		smutils->LogError(myself, "Failed to get CHLTVServer::ConnectClient offset.");
 	}
@@ -90,7 +97,7 @@ void CForwardManager::Init()
 		m_bHasClientConnectOffset = true;
 	}
 
-	if (!g_pGameConf->GetOffset("CHLTVServer::RejectConnection", &offset) || offset == -1)
+	if (!g_pGameConf->GetOffset("CHLTVServer::RejectConnection", &offset) || offset < 0)
 	{
 		smutils->LogError(myself, "Failed to get CHLTVServer::RejectConnection offset.");
 	}
@@ -100,7 +107,7 @@ void CForwardManager::Init()
 		m_bHasRejectConnectionOffset = true;
 	}
 
-	if (!g_pGameConf->GetOffset("CHLTVServer::GetChallengeType", &offset) || offset == -1)
+	if (!g_pGameConf->GetOffset("CHLTVServer::GetChallengeType", &offset) || offset < 0)
 	{
 		smutils->LogError(myself, "Failed to get CHLTVServer::GetChallengeType offset.");
 	}
@@ -110,7 +117,7 @@ void CForwardManager::Init()
 		m_bHasGetChallengeTypeOffset = true;
 	}
 
-	if (!g_pGameConf->GetOffset("CBaseClient::ActivatePlayer", &offset) || offset == -1)
+	if (!g_pGameConf->GetOffset("CBaseClient::ActivatePlayer", &offset) || offset < 0)
 	{
 		smutils->LogError(myself, "Failed to get CBaseClient::ActivatePlayer offset.");
 	}
@@ -121,7 +128,7 @@ void CForwardManager::Init()
 	}
 
 #ifndef WIN32
-	if (!g_pGameConf->GetOffset("CBaseClient::Disconnect", &offset) || offset == -1)
+	if (!g_pGameConf->GetOffset("CBaseClient::Disconnect", &offset) || offset < 0)
 	{
 		smutils->LogError(myself, "Failed to get CBaseClient::Disconnect offset.");
 	}
@@ -153,6 +160,16 @@ void CForwardManager::Init()
 
 void CForwardManager::Shutdown()
 {
+	if (!m_Initialized)
+		return;
+
+	m_Initialized = false;
+	RemoveBroadcastLocalChatDetour();
+#ifndef WIN32
+	RemoveStartRecordingDetour();
+	RemoveStopRecordingDetour();
+#endif
+	m_RecordingSessions.Reset();
 	plsys->RemovePluginsListener(this);
 	forwards->ReleaseForward(m_StartRecordingFwd);
 	forwards->ReleaseForward(m_StopRecordingFwd);
@@ -173,12 +190,13 @@ void CForwardManager::Shutdown()
 
 void CForwardManager::OnPluginUnloaded(IPlugin *plugin)
 {
-	if (plugin && m_RecordingOwner.plugin == plugin && m_RecordingOwner.pluginSerial == plugin->GetSerial())
-		m_RecordingOwner = { nullptr, 0, nullptr, 0 };
+	if (plugin)
+		m_RecordingSessions.Revoke({plugin, plugin->GetSerial()});
 }
 
 void CForwardManager::HookRecorder(IDemoRecorder *recorder)
 {
+	m_RecordingSessions.Attach(recorder);
 #ifdef WIN32
 	SH_ADD_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Pre), false);
 	SH_ADD_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Post), true);
@@ -189,6 +207,7 @@ void CForwardManager::HookRecorder(IDemoRecorder *recorder)
 
 void CForwardManager::UnhookRecorder(IDemoRecorder *recorder)
 {
+	m_RecordingSessions.Forget(recorder);
 #ifdef WIN32
 	SH_REMOVE_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Pre), false);
 	SH_REMOVE_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Post), true);
@@ -210,9 +229,9 @@ void CForwardManager::HookServer(HLTVServerWrapper *wrapper)
 	for (int i = 0; i < server->GetClientCount(); i++)
 	{
 		IClient *client = server->GetClient(i);
-		if (client->IsConnected())
+		if (client && client->IsConnected())
 		{
-			HookClient(client);
+			HookClient(wrapper, client);
 			// Ip and password unknown :(
 			// Could add more gamedata to fetch it if people really lateload the extension and expect it to work :B
 			wrapper->GetClient(i + 1)->Initialize("", "", client);
@@ -229,17 +248,19 @@ void CForwardManager::UnhookServer(HLTVServerWrapper *wrapper)
 	if (m_bHasGetChallengeTypeOffset)
 		SH_REMOVE_MANUALHOOK(CHLTVServer_GetChallengeType, server, SH_MEMBER(this, &CForwardManager::OnGetChallengeType), false);
 
-	// Unhook all connected clients as well.
-	for (int i = 0; i < server->GetClientCount(); i++)
-	{
-		IClient *client = server->GetClient(i);
-		if (client->IsConnected())
-			UnhookClient(client);
+	// Unhook exactly the receivers registered for this server.
+	for (auto it = m_HookedClients.begin(); it != m_HookedClients.end();) {
+		const auto current = it++;
+		if (current->second == wrapper)
+			UnhookClient(current->first);
 	}
 }
 
-void CForwardManager::HookClient(IClient *client)
+void CForwardManager::HookClient(HLTVServerWrapper *owner, IClient *client)
 {
+	if (!m_HookedClients.emplace(client, owner).second)
+		return;
+
 	// Hook ExecuteStringCommand for chat messages
 	g_pSTVCommonHooks.AddSpectatorHook(this, client);
 
@@ -258,6 +279,11 @@ void CForwardManager::HookClient(IClient *client)
 
 void CForwardManager::UnhookClient(IClient *client)
 {
+	if (!m_HookedClients.erase(client))
+		return;
+
+	m_Commands.Forget(client);
+
 	// Remove ExecuteStringCommand hook
 	g_pSTVCommonHooks.RemoveSpectatorHook(this, client);
 
@@ -317,7 +343,6 @@ static bool ExtractPlayerName(CUtlVector<NetMsg_SplitPlayerConnect *> &pSplitPla
 
 // Mimic Connect extension https://forums.alliedmods.net/showthread.php?t=162489
 // Thanks asherkin!
-char passwordBuffer[255];
 #if SOURCE_ENGINE == SE_CSGO
 // CHLTVServer::ConnectClient(ns_address const&, int, int, int, char const*, char const*, char const*, int, CUtlVector<CNetMessagePB<16, CCLCMsg_SplitPlayerConnect, 0, true> *, CUtlMemory<CNetMessagePB<16, CCLCMsg_SplitPlayerConnect, 0, true> *, int>> &, bool, CrossPlayPlatform_t, unsigned char const*, int)
 IClient *CForwardManager::OnSpectatorConnect(const netadr_t & address, int nProtocol, int iChallenge, int nAuthProtocol, const char *pchName, const char *pchPassword, const char *pCookie, int cbCookie, CUtlVector<NetMsg_SplitPlayerConnect *> &pSplitPlayerConnectVector, bool bUnknown, CrossPlayPlatform_t platform, const unsigned char *pUnknown, int iUnknown)
@@ -327,7 +352,7 @@ IClient *CForwardManager::OnSpectatorConnect(const netadr_t & address, int nProt
 IClient *CForwardManager::OnSpectatorConnect(netadr_t & address, int nProtocol, int iChallenge, int iClientChallenge, int nAuthProtocol, const char *pchName, const char *pchPassword, const char *pCookie, int cbCookie)
 #endif
 {
-	if (!pCookie || cbCookie < static_cast<int>(sizeof(uint64)))
+	if (META_RESULT_STATUS >= MRES_SUPERCEDE || !pCookie || cbCookie < static_cast<int>(sizeof(uint64)))
 		RETURN_META_VALUE(MRES_IGNORED, nullptr);
 
 #if SOURCE_ENGINE == SE_CSGO
@@ -338,62 +363,61 @@ IClient *CForwardManager::OnSpectatorConnect(netadr_t & address, int nProtocol, 
 		pchName = playerName;
 #endif
 
+	IServer *server = META_IFACEPTR(IServer);
+	const auto wrapper = g_HLTVServers.Pin(g_HLTVServers.GetWrapper(server));
+	if (!wrapper)
+		RETURN_META_VALUE(MRES_IGNORED, nullptr);
+
 	char ipString[16];
 	V_snprintf(ipString, sizeof(ipString), "%u.%u.%u.%u", address.ip[0], address.ip[1], address.ip[2], address.ip[3]);
-	V_strncpy(passwordBuffer, pchPassword, 255);
+	sourcetv::ConnectionBuffers buffers(pchPassword);
 
-	// SourceTV doesn't validate steamids?!
-
-	char rejectReason[255];
-
-	m_SpectatorPreConnectFwd->PushString(pchName);
-	m_SpectatorPreConnectFwd->PushStringEx(passwordBuffer, 255, SM_PARAM_STRING_UTF8 | SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
+	m_SpectatorPreConnectFwd->PushString(pchName ? pchName : "");
+	m_SpectatorPreConnectFwd->PushStringEx(buffers.password.data(), buffers.password.size(), SM_PARAM_STRING_UTF8 | SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
 	m_SpectatorPreConnectFwd->PushString(ipString);
-	m_SpectatorPreConnectFwd->PushStringEx(rejectReason, 255, SM_PARAM_STRING_UTF8 | SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
+	m_SpectatorPreConnectFwd->PushStringEx(buffers.rejection.data(), buffers.rejection.size(), SM_PARAM_STRING_UTF8 | SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
 
 	cell_t retVal = 1;
 	m_SpectatorPreConnectFwd->Execute(&retVal);
+	buffers.Terminate();
+	if (!wrapper->IsActive())
+		RETURN_META_VALUE(MRES_SUPERCEDE, nullptr);
 
-	IServer *server = META_IFACEPTR(IServer);
 	if (retVal == 0)
 	{
 		if (m_bHasRejectConnectionOffset)
 		{
 #if SOURCE_ENGINE == SE_CSGO || SOURCE_ENGINE == SE_LEFT4DEAD || SOURCE_ENGINE == SE_LEFT4DEAD2
-			SH_MCALL(server, CHLTVServer_RejectConnection)(address, rejectReason);
+			SH_MCALL(server, CHLTVServer_RejectConnection)(address, "%s", buffers.rejection.data());
 #else
-			SH_MCALL(server, CHLTVServer_RejectConnection)(address, iClientChallenge, rejectReason);
+			SH_MCALL(server, CHLTVServer_RejectConnection)(address, iClientChallenge, buffers.rejection.data());
 #endif
 		}
 		RETURN_META_VALUE(MRES_SUPERCEDE, nullptr);
 	}
 
-	// Call the original function.
+	// Continue through other pre-hooks before the engine call.
 #if SOURCE_ENGINE == SE_CSGO
-	IClient *client = SH_MCALL(server, CHLTVServer_ConnectClient)(address, nProtocol, iChallenge, nAuthProtocol, pchName, passwordBuffer, pCookie, cbCookie, pSplitPlayerConnectVector, bUnknown, platform, pUnknown, iUnknown);
+	IClient *client = SOURCETV_RECALL_MANUAL(CHLTVServer_ConnectClient, address, nProtocol, iChallenge, nAuthProtocol, pchName, buffers.password.data(), pCookie, cbCookie, pSplitPlayerConnectVector, bUnknown, platform, pUnknown, iUnknown);
 #elif SOURCE_ENGINE == SE_LEFT4DEAD || SOURCE_ENGINE == SE_LEFT4DEAD2
-	IClient *client = SH_MCALL(server, CHLTVServer_ConnectClient)(address, nProtocol, iChallenge, nAuthProtocol, pchName, passwordBuffer, pCookie, cbCookie, pSplitPlayerConnectVector, bUnknown);
+	IClient *client = SOURCETV_RECALL_MANUAL(CHLTVServer_ConnectClient, address, nProtocol, iChallenge, nAuthProtocol, pchName, buffers.password.data(), pCookie, cbCookie, pSplitPlayerConnectVector, bUnknown);
 #else
-	IClient *client = SH_MCALL(server, CHLTVServer_ConnectClient)(address, nProtocol, iChallenge, iClientChallenge, nAuthProtocol, pchName, passwordBuffer, pCookie, cbCookie);
+	IClient *client = SOURCETV_RECALL_MANUAL(CHLTVServer_ConnectClient, address, nProtocol, iChallenge, iClientChallenge, nAuthProtocol, pchName, buffers.password.data(), pCookie, cbCookie);
 #endif
 
-	if (!client)
+	if (!client || !wrapper->IsActive())
 		RETURN_META_VALUE(MRES_SUPERCEDE, nullptr);
 
-	HookClient(client);
+	HookClient(wrapper.get(), client);
+	const int clientIndex = client->GetPlayerSlot() + 1;
+	wrapper->GetClient(clientIndex)->Initialize(ipString, buffers.password.data(), client);
 
-	HLTVServerWrapper *wrapper = g_HLTVServers.GetWrapper(server);
-	if (wrapper)
-	{
-		HLTVClientWrapper *clientWrapper = wrapper->GetClient(client->GetPlayerSlot() + 1);
-		clientWrapper->Initialize(ipString, pchPassword, client);
-	}
-
-	m_SpectatorConnectedFwd->PushCell(client->GetPlayerSlot() + 1);
+	m_SpectatorConnectedFwd->PushCell(clientIndex);
 	m_SpectatorConnectedFwd->Execute();
 
-	// Don't call the hooked function again, just return its value.
-	RETURN_META_VALUE(MRES_SUPERCEDE, client);
+	const auto hooked = m_HookedClients.find(client);
+	RETURN_META_VALUE(MRES_SUPERCEDE,
+		wrapper->IsActive() && hooked != m_HookedClients.end() && hooked->second == wrapper.get() ? client : nullptr);
 }
 
 // Force steam authentication
@@ -431,23 +455,41 @@ void CForwardManager::IClient_OnSpectatorDisconnect(const char *reason)
 
 void CForwardManager::HandleSpectatorDisconnect(IClient *client, const char *reason)
 {
+	const auto hooked = m_HookedClients.find(client);
+	if (hooked == m_HookedClients.end())
+		return;
+	const auto owner = g_HLTVServers.Pin(hooked->second);
+	if (!owner || !owner->IsActive())
+		return;
 	UnhookClient(client);
 
-	char disconnectReason[255];
-	V_strncpy(disconnectReason, reason, 255);
+	char disconnectReason[255]{};
+	V_strncpy(disconnectReason, reason ? reason : "", sizeof(disconnectReason));
 	int clientIndex = client->GetPlayerSlot() + 1;
 
 	m_SpectatorDisconnectFwd->PushCell(clientIndex);
 	m_SpectatorDisconnectFwd->PushStringEx(disconnectReason, 255, SM_PARAM_STRING_UTF8 | SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
 	m_SpectatorDisconnectFwd->Execute();
+	disconnectReason[sizeof(disconnectReason) - 1] = '\0';
+	if (!owner->IsActive() || m_HookedClients.count(client))
+		return;
 
-	// We always call the IClient::Disconnect variant, even if we're coming from CGameClient::Disconnect on linux.
-	// They point to the same function in the engine though. Could only confuse other hooks, so might need to revisit this.
+	IServer *server = owner->GetBaseServer();
+	const int slot = clientIndex - 1;
+	if (slot < 0 || slot >= server->GetClientCount() || server->GetClient(slot) != client)
+		return;
+
+	// A listener may already have disconnected this spectator.
+	if (client->IsConnected()) {
 #if SOURCE_ENGINE == SE_CSGO
-	SH_CALL(client, &IClient::Disconnect)(disconnectReason);
+		SH_CALL(client, &IClient::Disconnect)(disconnectReason);
 #else
-	SH_CALL(client, &IClient::Disconnect)("%s", disconnectReason);
+		SH_CALL(client, &IClient::Disconnect)("%s", disconnectReason);
 #endif
+	}
+
+	if (!owner->IsActive() || m_HookedClients.count(client))
+		return;
 
 	m_SpectatorDisconnectedFwd->PushCell(clientIndex);
 	m_SpectatorDisconnectedFwd->PushString(disconnectReason);
@@ -492,40 +534,29 @@ bool CForwardManager::IClient_OnSpectatorExecuteStringCommand(const char *s)
 
 void CForwardManager::HandleSpectatorExecuteStringCommand(IClient *client, const char *s)
 {
-	if (!hltvserver)
+	const auto hooked = m_HookedClients.find(client);
+	if (hooked == m_HookedClients.end())
 		return;
 
-	if (!s || !s[0])
-		return;
-
+	std::optional<sourcetv::ChatMessage> chat;
 	CCommand args;
-	if (!args.Tokenize(s))
-		return;
-
-	// See if the client wants to chat.
-	if (!Q_stricmp(args[0], "say") && args.ArgC() > 1)
-	{
-		// TODO find correct hltvserver this client is connected to!
-
-		// The parsed argument belongs to this stack-local CCommand; the wrapper
-		// copies it so the later broadcast detour never keeps a borrowed pointer.
-		hltvserver->SetLastChatClient(client);
-		hltvserver->SetLastChatMessage(args[1]);
+	if (s && s[0] && args.Tokenize(s) && args.ArgC() > 1 && !Q_stricmp(args[0], "say")) {
+		chat = sourcetv::ChatMessage{client->GetPlayerSlot() + 1, client->GetClientName(), args[1]};
 	}
+	m_Commands.Begin(hooked->second, client, std::move(chat));
 }
 
-// Reset the pointers after the command was executed.
-bool CForwardManager::OnSpectatorExecuteStringCommand_Post(const char *s)
+bool CForwardManager::IClient_OnSpectatorExecuteStringCommand_Post(const char *s)
 {
-	if (!hltvserver)
-		RETURN_META_VALUE(MRES_IGNORED, true);
+	m_Commands.End(META_IFACEPTR(IClient));
+	RETURN_META_VALUE(MRES_IGNORED, true);
+}
 
-	// TODO find correct hltvserver this client is connected to!
-	//      need separate hooks for IClient and CBaseClient in TF2
-
-	hltvserver->SetLastChatClient(nullptr);
-	hltvserver->SetLastChatMessage(nullptr);
-
+bool CForwardManager::BaseClient_OnSpectatorExecuteStringCommand_Post(const char *s)
+{
+	void *gameClient = META_IFACEPTR(void);
+	if (gameClient)
+		m_Commands.End(reinterpret_cast<IClient*>(reinterpret_cast<intptr_t>(gameClient) + 4));
 	RETURN_META_VALUE(MRES_IGNORED, true);
 }
 
@@ -539,65 +570,43 @@ DETOUR_DECL_MEMBER2(DetourHLTVServer_BroadcastLocalChat, void, const char *, cha
 		return;
 	}
 
-	static int hltvserver_inherit_offset = -1;
-	if (hltvserver_inherit_offset == -1)
-	{
-		if (!g_pGameConf->GetOffset("IServer_from_CHLTVServer", &hltvserver_inherit_offset) || hltvserver_inherit_offset == -1)
-		{
-			// IServer is +8 from CHLTVServer due to multiple inheritance - except for TF2?
-			hltvserver_inherit_offset = 8;
-		}
+	const auto& binding = HltvServerBaseBinding();
+	IServer* server = binding ? static_cast<IServer*>(binding->ServerBase(this)) : nullptr;
+	const auto wrapper = g_HLTVServers.Pin(g_HLTVServers.GetWrapper(server));
+	if (!wrapper) {
+		DETOUR_MEMBER_CALL(DetourHLTVServer_BroadcastLocalChat)(chat, chatgroup);
+		return;
 	}
+	const auto command = g_pSTVForwards.CurrentChat(wrapper.get());
+	const int clientIndex = command ? command->index : 0;
 
-	IServer *server = (IServer *)((intptr_t)this + hltvserver_inherit_offset);
-	HLTVServerWrapper *wrapper = g_HLTVServers.GetWrapper(server);
-
-	// Copy content in changeable buffer.
 	char chatBuffer[256], groupBuffer[256];
-	ke::SafeStrcpy(chatBuffer, sizeof(chatBuffer), chat);
+	ke::SafeStrcpy(chatBuffer, sizeof(chatBuffer), command ? command->text.c_str() : chat);
 	ke::SafeStrcpy(groupBuffer, sizeof(groupBuffer), chatgroup);
 
-	// See if we can provide only the chat message without the name printed before.
-	// The engine formats the chat like "Name : Message" before calling BroadcastLocalChat..
-	if (wrapper)
-	{
-		const char *msg = wrapper->GetLastChatMessage();
-		// Use only the typed text if possible
-		if (msg)
-			ke::SafeStrcpy(chatBuffer, sizeof(chatBuffer), msg);
-	}
-
-	// Call the forward for this message.
-	bool supercede = g_pSTVForwards.CallOnSpectatorChatMessage(wrapper, chatBuffer, sizeof(chatBuffer), groupBuffer, sizeof(groupBuffer));
-	if (supercede)
+	if (g_pSTVForwards.CallOnSpectatorChatMessage(clientIndex, chatBuffer, sizeof(chatBuffer), groupBuffer, sizeof(groupBuffer)))
+		return;
+	if (!wrapper->IsActive())
 		return;
 
-	// Use the potentially modified strings.
-	chat = chatBuffer;
-	chatgroup = groupBuffer;
-
+	chatBuffer[sizeof(chatBuffer) - 1] = '\0';
+	groupBuffer[sizeof(groupBuffer) - 1] = '\0';
 	char messageBuffer[1024];
-	// Might have to add the name again, if we had the chat message in our hands.
-	if (wrapper)
-	{
-		if (wrapper->GetLastChatMessage())
-		{
-			// Format the message the same as the engine does.
-			ke::SafeSprintf(messageBuffer, sizeof(messageBuffer), "%s : %s", wrapper->GetLastChatClient()->GetClientName(), chatBuffer);
-			chat = messageBuffer;
-		}
+	chat = chatBuffer;
+	if (command) {
+		ke::SafeSprintf(messageBuffer, sizeof(messageBuffer), "%s : %s", command->name.c_str(), chatBuffer);
+		chat = messageBuffer;
 	}
-	
-	// Print the message
-	DETOUR_MEMBER_CALL(DetourHLTVServer_BroadcastLocalChat)(chat, chatgroup);
-	
-	// Call the post message forward with the changed output.
-	g_pSTVForwards.CallOnSpectatorChatMessage_Post(wrapper, chatBuffer, groupBuffer);
+
+	DETOUR_MEMBER_CALL(DetourHLTVServer_BroadcastLocalChat)(chat, groupBuffer);
+
+	if (wrapper->IsActive())
+		g_pSTVForwards.CallOnSpectatorChatMessage_Post(clientIndex, chatBuffer, groupBuffer);
 }
 
 void CForwardManager::CreateBroadcastLocalChatDetour()
 {
-	if (m_bBroadcastLocalChatDetoured)
+	if (m_bBroadcastLocalChatDetoured || !HltvServerBaseBinding())
 		return;
 
 	m_DBroadcastLocalChat = DETOUR_CREATE_MEMBER(DetourHLTVServer_BroadcastLocalChat, "CHLTVServer::BroadcastLocalChat");
@@ -621,16 +630,8 @@ void CForwardManager::RemoveBroadcastLocalChatDetour()
 	m_bBroadcastLocalChatDetoured = false;
 }
 
-bool CForwardManager::CallOnSpectatorChatMessage(HLTVServerWrapper *server, char *msg, int msglen, char *chatgroup, int grouplen)
+bool CForwardManager::CallOnSpectatorChatMessage(int clientIndex, char *msg, int msglen, char *chatgroup, int grouplen)
 {
-	int clientIndex = 0;
-	if (server)
-	{
-		IClient *client = server->GetLastChatClient();
-		if (client)
-			clientIndex = client->GetPlayerSlot() + 1;
-	}
-
 	m_SpectatorChatMessageFwd->PushCell(clientIndex);
 	m_SpectatorChatMessageFwd->PushStringEx(msg, msglen, SM_PARAM_STRING_UTF8 | SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
 	m_SpectatorChatMessageFwd->PushStringEx(chatgroup, grouplen, SM_PARAM_STRING_UTF8 | SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
@@ -642,16 +643,8 @@ bool CForwardManager::CallOnSpectatorChatMessage(HLTVServerWrapper *server, char
 	return false;
 }
 
-void CForwardManager::CallOnSpectatorChatMessage_Post(HLTVServerWrapper *server, const char *msg, const char *chatgroup)
+void CForwardManager::CallOnSpectatorChatMessage_Post(int clientIndex, const char *msg, const char *chatgroup)
 {
-	int clientIndex = 0;
-	if (server)
-	{
-		IClient *client = server->GetLastChatClient();
-		if (client)
-			clientIndex = client->GetPlayerSlot() + 1;
-	}
-
 	m_SpectatorChatMessagePostFwd->PushCell(clientIndex);
 	m_SpectatorChatMessagePostFwd->PushString(msg);
 	m_SpectatorChatMessagePostFwd->PushString(chatgroup);
@@ -660,8 +653,8 @@ void CForwardManager::CallOnSpectatorChatMessage_Post(HLTVServerWrapper *server,
 
 bool CForwardManager::HasSpectatorChatListeners()
 {
-	return m_SpectatorChatMessageFwd->GetFunctionCount() > 0 ||
-		m_SpectatorChatMessagePostFwd->GetFunctionCount() > 0;
+	return m_Initialized && (m_SpectatorChatMessageFwd->GetFunctionCount() > 0 ||
+		m_SpectatorChatMessagePostFwd->GetFunctionCount() > 0);
 }
 
 // These two hooks are actually only hooked on windows.
@@ -686,7 +679,8 @@ void CForwardManager::OnStopRecording()
 #endif
 {
 	IDemoRecorder *recorder = META_IFACEPTR(IDemoRecorder);
-	CallOnStopRecording(recorder);
+	if (!CallOnStopRecording(recorder))
+		RETURN_META(MRES_SUPERCEDE);
 	RETURN_META(MRES_IGNORED);
 }
 
@@ -701,38 +695,51 @@ void CForwardManager::OnStopRecording_Post()
 	RETURN_META(MRES_IGNORED);
 }
 
+namespace recording = sourcetv::recording;
+
+static recording::Snapshot CaptureRecorder(IDemoRecorder *recorder, bool withTick)
+{
+	recording::Snapshot result;
+	result.active = recorder->IsRecording();
+	if (auto* wrapper = g_HLTVServers.GetWrapper(recorder)) {
+		result.instance = wrapper->GetInstanceNumber();
+		if (result.active) {
+			const char* filename = wrapper->GetDemoFileName();
+			if (filename)
+				result.filename = filename;
+		}
+	}
+	if (withTick && result.active)
+		result.tick = recorder->GetRecordingTick();
+	return result;
+}
+
 void CForwardManager::CallOnStartRecording(IDemoRecorder *recorder, const char *filename, bool bContinuously)
 {
-	PendingRecordingStart previous = { false, "" };
-	auto previousStart = m_PendingRecordingStarts.find(recorder);
-	if (previousStart != m_PendingRecordingStarts.end())
-	{
-		previous = previousStart->second;
-		m_PendingRecordingStarts.erase(previousStart);
-	}
-	HLTVServerWrapper *wrapper = g_HLTVServers.GetWrapper(recorder);
-	int instance = -1;
-	std::string effectiveFilename = filename ? filename : "";
-	if (wrapper)
-	{
-		instance = wrapper->GetInstanceNumber();
-		const char *recorderFilename = wrapper->GetDemoFileName();
-		if (recorderFilename && recorderFilename[0] != '\0')
-			effectiveFilename = recorderFilename;
-	}
+	const auto frame = m_RecordingSessions.EndStart(recorder);
+	recording::Snapshot effective;
+	if (frame)
+		effective = CaptureRecorder(recorder, false);
+	if (effective.filename.empty() && filename)
+		effective.filename = filename;
+	const auto revision = m_RecordingSessions.Current(recorder);
+	const bool newFile = frame && frame->revision == revision && effective.active &&
+		(!frame->before.active || stricmp(frame->before.filename.c_str(), effective.filename.c_str()) != 0);
+	if (newFile)
+		m_RecordingSessions.ConfirmNewFile(recorder, revision);
 
 	if (m_StartRecordingFwd->GetFunctionCount() > 0)
 	{
-		m_StartRecordingFwd->PushCell(instance);
-		m_StartRecordingFwd->PushString(effectiveFilename.c_str());
+		m_StartRecordingFwd->PushCell(effective.instance);
+		m_StartRecordingFwd->PushString(effective.filename.c_str());
 		m_StartRecordingFwd->Execute();
 	}
 
-	bool newFile = !previous.wasRecording || stricmp(previous.filename.c_str(), effectiveFilename.c_str()) != 0;
-	if (newFile && recorder->IsRecording() && m_RecordingFileStartedFwd->GetFunctionCount() > 0)
+	if (newFile && m_RecordingSessions.Current(recorder) == revision && recorder->IsRecording()
+		&& m_RecordingFileStartedFwd->GetFunctionCount() > 0)
 	{
-		m_RecordingFileStartedFwd->PushCell(instance);
-		m_RecordingFileStartedFwd->PushString(effectiveFilename.c_str());
+		m_RecordingFileStartedFwd->PushCell(effective.instance);
+		m_RecordingFileStartedFwd->PushString(effective.filename.c_str());
 		m_RecordingFileStartedFwd->PushCell(bContinuously ? 1 : 0);
 		m_RecordingFileStartedFwd->Execute();
 	}
@@ -740,116 +747,53 @@ void CForwardManager::CallOnStartRecording(IDemoRecorder *recorder, const char *
 
 void CForwardManager::CaptureRecordingStartState(IDemoRecorder *recorder)
 {
-	if (!recorder)
-		return;
-	PendingRecordingStart state = { recorder->IsRecording(), "" };
-	if (state.wasRecording)
-	{
-		HLTVServerWrapper *wrapper = g_HLTVServers.GetWrapper(recorder);
-		const char *filename = wrapper ? wrapper->GetDemoFileName() : nullptr;
-		if (filename)
-			state.filename = filename;
-	}
-	m_PendingRecordingStarts[recorder] = state;
+	if (m_RecordingSessions.Current(recorder).lifetime)
+		m_RecordingSessions.BeginStart(recorder, CaptureRecorder(recorder, false));
 }
 
-void CForwardManager::CallOnStopRecording(IDemoRecorder *recorder)
+bool CForwardManager::CallOnStopRecording(IDemoRecorder *recorder)
 {
-	if (!recorder->IsRecording())
-		return;
-	
-	HLTVServerWrapper *wrapper = g_HLTVServers.GetWrapper(recorder);
-	int instance = -1;
-	const char *pDemoFile = "";
-	if (wrapper)
-	{
-		instance = wrapper->GetInstanceNumber();
-		pDemoFile = wrapper->GetDemoFileName();
-	}
-	PendingRecordingClose pending;
-	pending.instance = instance;
-	pending.tick = recorder->GetRecordingTick();
-	pending.filename = pDemoFile ? pDemoFile : "";
-	m_PendingRecordingCloses[recorder] = pending;
+	const auto before = m_RecordingSessions.Current(recorder);
+	if (!before.lifetime)
+		return true;
+	const auto snapshot = CaptureRecorder(recorder, true);
+	m_RecordingSessions.BeginClose(recorder, snapshot);
 
-	if (m_StopRecordingFwd->GetFunctionCount() > 0)
+	if (snapshot.active && m_StopRecordingFwd->GetFunctionCount() > 0)
 	{
-		m_StopRecordingFwd->PushCell(instance);
-		m_StopRecordingFwd->PushString(pending.filename.c_str());
-		m_StopRecordingFwd->PushCell(pending.tick);
+		m_StopRecordingFwd->PushCell(snapshot.instance);
+		m_StopRecordingFwd->PushString(snapshot.filename.c_str());
+		m_StopRecordingFwd->PushCell(snapshot.tick);
 		m_StopRecordingFwd->Execute();
 	}
+	return m_RecordingSessions.CloseStillCurrent(recorder, before);
 }
 
 void CForwardManager::CallOnRecordingFileClosed(IDemoRecorder *recorder)
 {
-	auto found = m_PendingRecordingCloses.find(recorder);
-	if (found == m_PendingRecordingCloses.end())
+	if (!m_RecordingSessions.HasPendingClose(recorder))
+		return;
+	const bool active = recorder->IsRecording();
+	auto* wrapper = active ? g_HLTVServers.GetWrapper(recorder) : nullptr;
+	const char* filename = wrapper ? wrapper->GetDemoFileName() : nullptr;
+	auto closed = m_RecordingSessions.EndClose(recorder, active, filename,
+		[](const char* left, const char* right) { return stricmp(left, right) == 0; });
+	if (!closed || m_RecordingFileClosedFwd->GetFunctionCount() == 0)
 		return;
 
-	PendingRecordingClose pending = found->second;
-	m_PendingRecordingCloses.erase(found);
-	bool stillRecording = recorder->IsRecording();
-	HLTVServerWrapper *wrapper = g_HLTVServers.GetWrapper(recorder);
-	const char *currentFilename = stillRecording && wrapper ? wrapper->GetDemoFileName() : nullptr;
-	bool fileChanged = currentFilename && stricmp(pending.filename.c_str(), currentFilename) != 0;
-	if (stillRecording && !fileChanged)
-		return;
-	if (!stillRecording)
-		ClearRecordingOwner(recorder);
-	if (m_RecordingFileClosedFwd->GetFunctionCount() == 0)
-		return;
-
-	m_RecordingFileClosedFwd->PushCell(pending.instance);
-	m_RecordingFileClosedFwd->PushString(pending.filename.c_str());
-	m_RecordingFileClosedFwd->PushCell(pending.tick);
+	m_RecordingFileClosedFwd->PushCell(closed->instance);
+	m_RecordingFileClosedFwd->PushString(closed->filename.c_str());
+	m_RecordingFileClosedFwd->PushCell(closed->tick);
 	m_RecordingFileClosedFwd->Execute();
 }
 
 void CForwardManager::CallOnRecorderAvailabilityChanged(int instance, bool available)
 {
-	if (m_RecorderAvailabilityChangedFwd->GetFunctionCount() == 0)
+	if (!m_Initialized || m_RecorderAvailabilityChangedFwd->GetFunctionCount() == 0)
 		return;
 	m_RecorderAvailabilityChangedFwd->PushCell(instance);
 	m_RecorderAvailabilityChangedFwd->PushCell(available ? 1 : 0);
 	m_RecorderAvailabilityChangedFwd->Execute();
-}
-
-cell_t CForwardManager::CreateRecordingOwner(IPlugin *plugin, IDemoRecorder *recorder)
-{
-	if (!plugin || !recorder || m_bRecordingOwnerTokensExhausted || m_RecordingOwner.token != 0)
-		return 0;
-	cell_t token = m_NextRecordingOwnerToken;
-	if (token <= 0)
-	{
-		m_bRecordingOwnerTokensExhausted = true;
-		return 0;
-	}
-	if (token == INT_MAX)
-		m_bRecordingOwnerTokensExhausted = true;
-	else
-		++m_NextRecordingOwnerToken;
-	m_RecordingOwner = { plugin, plugin->GetSerial(), recorder, token };
-	return token;
-}
-
-bool CForwardManager::IsRecordingOwner(IPlugin *plugin, IDemoRecorder *recorder, cell_t token)
-{
-	return plugin && recorder && token > 0 && m_RecordingOwner.token == token &&
-		m_RecordingOwner.plugin == plugin && m_RecordingOwner.pluginSerial == plugin->GetSerial() &&
-		m_RecordingOwner.recorder == recorder;
-}
-
-void CForwardManager::ClearRecordingOwner(IDemoRecorder *recorder)
-{
-	if (m_RecordingOwner.recorder == recorder)
-		m_RecordingOwner = { nullptr, 0, nullptr, 0 };
-	m_PendingRecordingCloses.erase(recorder);
-}
-
-cell_t CForwardManager::GetRecordingOwnerToken(IDemoRecorder *recorder)
-{
-	return recorder && m_RecordingOwner.recorder == recorder ? m_RecordingOwner.token : 0;
 }
 
 // Only need to detour these on Linux. Windows always uses the vtable.
@@ -871,13 +815,14 @@ DETOUR_DECL_MEMBER0(DetourHLTVStopRecording, void)
 #endif
 {
 	IDemoRecorder *recorder = (IDemoRecorder *)this;
-	g_pSTVForwards.CallOnStopRecording(recorder);
-
+	if (g_pSTVForwards.CallOnStopRecording(recorder))
+	{
 #if SOURCE_ENGINE == SE_CSGO
-	DETOUR_MEMBER_CALL(DetourHLTVStopRecording)(info);
+		DETOUR_MEMBER_CALL(DetourHLTVStopRecording)(info);
 #else
-	DETOUR_MEMBER_CALL(DetourHLTVStopRecording)();
+		DETOUR_MEMBER_CALL(DetourHLTVStopRecording)();
 #endif
+	}
 	g_pSTVForwards.CallOnRecordingFileClosed(recorder);
 }
 
