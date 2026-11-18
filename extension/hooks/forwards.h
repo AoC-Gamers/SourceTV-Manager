@@ -33,6 +33,7 @@
 #define _INCLUDE_SOURCEMOD_EXTENSION_FORWARDS_H_
 
 #include "core/recording_sessions.h"
+#include <array>
 #include "core/hook_context.h"
 #include "extension.h"
 #include <string>
@@ -77,10 +78,7 @@ public:
 	void UnhookServer(HLTVServerWrapper *server);
 
 #ifndef WIN32
-	void CreateStartRecordingDetour();
-	void RemoveStartRecordingDetour();
-	void CreateStopRecordingDetour();
-	void RemoveStopRecordingDetour();
+	bool InstallRecordingDetours();
 #endif
 
 	void CallOnServerStart(IHLTVServer *server);
@@ -170,10 +168,9 @@ private:
 
 	// Only need the detours on linux. Windows always uses its vtables..
 #ifndef WIN32
-	bool m_bStartRecordingDetoured = false;
-	CDetour *m_DStartRecording = nullptr;
-	bool m_bStopRecordingDetoured = false;
-	CDetour *m_DStopRecording = nullptr;
+	std::array<CDetour*, 2> m_RecordingDetours{};
+#else
+	std::unordered_map<IDemoRecorder*, std::array<int, 4>> m_RecorderHooks;
 #endif
 };
 

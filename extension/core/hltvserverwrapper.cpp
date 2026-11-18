@@ -372,10 +372,6 @@ void HLTVServerWrapperManager::AddServer(IHLTVServer *server)
 	}
 
 	g_pSTVForwards.CreateBroadcastLocalChatDetour();
-#ifndef WIN32
-	g_pSTVForwards.CreateStartRecordingDetour();
-	g_pSTVForwards.CreateStopRecordingDetour();
-#endif
 
 	const auto wrapper = ke::RefPtr<HLTVServerWrapper>(new HLTVServerWrapper(server));
 	if (!wrapper->GetBaseServer())
@@ -387,8 +383,9 @@ void HLTVServerWrapperManager::AddServer(IHLTVServer *server)
 
 	g_pSTVForwards.CallOnServerStart(server);
 	if (wrapper->IsActive()) {
-		wrapper->m_AnnouncedRecorder = true;
-		g_pSTVForwards.CallOnRecorderAvailabilityChanged(wrapper->GetInstanceNumber(), wrapper->GetDemoRecorder() != nullptr);
+		const bool available = g_pSTVForwards.RecordingSessions().Current(wrapper->GetDemoRecorder()).lifetime != 0;
+		wrapper->m_AnnouncedRecorder = available;
+		g_pSTVForwards.CallOnRecorderAvailabilityChanged(wrapper->GetInstanceNumber(), available);
 	}
 }
 

@@ -29,6 +29,7 @@
 * Version: $Id$
 */
 
+#include "print_recipient.h"
 #include "extension.h"
 #include "core/local_hltv_broadcast.h"
 #include "natives/natives.h"
@@ -680,34 +681,30 @@ static cell_t Native_GetRecordingTick(IPluginContext *pContext, const cell_t *pa
 }
 
 // native bool:SourceTV_PrintToDemoConsole(const String:format[], any:...);
-static cell_t Native_PrintToDemoConsole(IPluginContext *pContext, const cell_t *params)
+static bool FormatPrint(IPluginContext *context, const cell_t *params, unsigned int index,
+	char (&buffer)[1024])
 {
-	if (hltvserver == nullptr)
-		return 0;
-	if (!HasFormatString(*pContext, params, 1))
-		return 0;
-
-	if (!iserver)
-		return 0;
-	IClient *pClient = iserver->GetClient(hltvserver->GetHLTVServer()->GetHLTVSlot());
-	if (!pClient)
-		return 0;
-
-	char buffer[1024];
-	size_t len;
-	{
-		DetectExceptions eh(pContext);
-		len = smutils->FormatString(buffer, sizeof(buffer), pContext, params, 1);
-		if (eh.HasException())
-			return 0;
-	}
-
-	pClient->ClientPrintf("%s\n", buffer);
-
-	return 1;
+	DetectExceptions handler(context);
+	smutils->FormatString(buffer, sizeof(buffer), context, params, index);
+	return !handler.HasException();
 }
 
+static cell_t Native_PrintToDemoConsole(IPluginContext *pContext, const cell_t *params)
+{
+	const auto server = g_HLTVServers.Pin(hltvserver);
+	if (!server || !HasFormatString(*pContext, params, 1))
+		return 0;
 
+	const int slot = server->GetHLTVServer()->GetHLTVSlot();
+	char buffer[1024];
+	return sourcetv::PrintToRecipient([&] {
+		return server->IsActive() ? sourcetv::ClientAt(iserver, slot) : nullptr;
+	}, [&] {
+		return FormatPrint(pContext, params, 1, buffer);
+	}, [&](IClient *client) {
+		client->ClientPrintf("%s\n", buffer);
+	});
+}
 
 // native SourceTV_GetSpectatorCount();
 static cell_t Native_GetSpectatorCount(IPluginContext *pContext, const cell_t *params)
@@ -889,126 +886,76 @@ static cell_t Native_KickClient(IPluginContext *pContext, const cell_t *params)
 }
 
 // native SourceTV_PrintToChat(client, const String:format[], any:...);
-static cell_t Native_PrintToChat(IPluginContext *pContext, const cell_t *params)
+template <class Emit>
+static void PrintToSpectator(IPluginContext *context, const cell_t *params, Emit emit)
 {
-	if (hltvserver == nullptr)
-		return 0;
-	if (!HasFormatString(*pContext, params, 2))
-		return 0;
+	const auto server = g_HLTVServers.Pin(hltvserver);
+	if (!server || !HasFormatString(*context, params, 2))
+		return;
 
-	cell_t client = params[1];
-	if (client < 1 || client > hltvserver->GetBaseServer()->GetClientCount())
-	{
-		pContext->ReportError("Invalid spectator client index %d.", client);
-		return 0;
+	const cell_t client = params[1];
+	if (client < 1 || client > server->GetBaseServer()->GetClientCount()) {
+		context->ReportError("Invalid spectator client index %d.", client);
+		return;
 	}
-
-	HLTVClientWrapper *pClient = hltvserver->FindClient(client);
-	if (!pClient || !pClient->IsConnected())
-	{
-		pContext->ReportError("Client %d is not connected.", client);
-		return 0;
+	auto* spectator = server->FindClient(client);
+	if (!spectator || !spectator->IsConnected()) {
+		context->ReportError("Client %d is not connected.", client);
+		return;
 	}
 
 	char buffer[1024];
-	size_t len;
-	{
-
+	sourcetv::PrintToRecipient([&] {
+		if (!server->IsActive() || client > server->GetBaseServer()->GetClientCount())
+			return static_cast<IClient*>(nullptr);
+		auto* current = server->FindClient(client);
+		return current ? current->BaseClient() : nullptr;
+	}, [&] {
+		auto format = [&] { return FormatPrint(context, params, 2, buffer); };
 #if SOURCE_ENGINE != SE_CSGO
-		// There's no way to set the current translation without a client index, so we'll save / restore the language on the relay.
-		int iHLTVRelay = hltvserver->GetHLTVServer()->GetHLTVSlot() + 1;
-		IGamePlayer *pHLTVRelay = playerhelpers->GetGamePlayer(iHLTVRelay);
-		pHLTVRelay->SetLanguageId(pClient->GetLanguageId());
-
-		int restoreTarget = translator->SetGlobalTarget(iHLTVRelay);
+		const int slot = server->GetHLTVServer()->GetHLTVSlot();
+		return sourcetv::FormatForRelay([&]() -> IGamePlayer* {
+			if (!sourcetv::ClientAt(iserver, slot))
+				return nullptr;
+			auto* relay = playerhelpers->GetGamePlayer(slot + 1);
+			return relay && relay->IsConnected() ? relay : nullptr;
+		}, *translator, slot + 1, spectator->GetLanguageId(), format);
+#else
+		return format();
 #endif
+	}, [&](IClient *recipient) { emit(recipient, buffer); });
+}
 
-		DetectExceptions eh(pContext);
-		len = smutils->FormatString(buffer, sizeof(buffer), pContext, params, 2);
-
-#if SOURCE_ENGINE != SE_CSGO
-		pHLTVRelay->SetLanguageId(translator->GetServerLanguage());
-		translator->SetGlobalTarget(restoreTarget);
-#endif
-
-		if (eh.HasException())
-			return 0;
-	}
-
-	IGameEvent *msg = gameevents->CreateEvent("hltv_chat", true);
-	if (!msg)
-		return 0;
+static cell_t Native_PrintToChat(IPluginContext *pContext, const cell_t *params)
+{
+	PrintToSpectator(pContext, params, [](IClient *client, const char *buffer) {
+		IGameEvent *msg = gameevents->CreateEvent("hltv_chat", true);
+		if (!msg)
+			return;
 
 #if SOURCE_ENGINE == SE_CSGO
-	wchar_t wBuffer[1024];
-	V_UTF8ToUnicode(buffer, wBuffer, sizeof(wBuffer));
-	msg->SetWString("text", wBuffer);
+		wchar_t wBuffer[1024];
+		V_UTF8ToUnicode(buffer, wBuffer, sizeof(wBuffer));
+		msg->SetWString("text", wBuffer);
 #else
-	msg->SetString("text", buffer);
+		msg->SetString("text", buffer);
 #endif
-
-	if (g_bHasClientFireGameEventOffset)
-	{
-		void *pGameClient = pClient->BaseClient();
-		// The IClient vtable is +4 from the CBaseClient vtable due to multiple inheritance.
-		pGameClient = (void *)((intptr_t)pGameClient - 4);
-		SH_MCALL(pGameClient, CBaseClient_FireGameEvent)(msg);
-	}
-
-	gameevents->FreeEvent(msg);
-
+		if (g_bHasClientFireGameEventOffset) {
+			// The IClient vtable is +4 from the CBaseClient vtable.
+			void *gameClient = (void *)((intptr_t)client - 4);
+			SH_MCALL(gameClient, CBaseClient_FireGameEvent)(msg);
+		}
+		gameevents->FreeEvent(msg);
+	});
 	return 0;
 }
 
 // native SourceTV_PrintToConsole(client, const String:format[], any:...);
 static cell_t Native_PrintToConsole(IPluginContext *pContext, const cell_t *params)
 {
-	if (hltvserver == nullptr)
-		return 0;
-	if (!HasFormatString(*pContext, params, 2))
-		return 0;
-
-	cell_t client = params[1];
-	if (client < 1 || client > hltvserver->GetBaseServer()->GetClientCount())
-	{
-		pContext->ReportError("Invalid spectator client index %d.", client);
-		return 0;
-	}
-
-	HLTVClientWrapper *pClient = hltvserver->FindClient(client);
-	if (!pClient || !pClient->IsConnected())
-	{
-		pContext->ReportError("Client %d is not connected.", client);
-		return 0;
-	}
-
-	char buffer[1024];
-	size_t len;
-	{
-
-#if SOURCE_ENGINE != SE_CSGO
-		// There's no way to set the current translation without a client index, so we'll save / restore the language on the relay.
-		int iHLTVRelay = hltvserver->GetHLTVServer()->GetHLTVSlot() + 1;
-		IGamePlayer *pHLTVRelay = playerhelpers->GetGamePlayer(iHLTVRelay);
-		pHLTVRelay->SetLanguageId(pClient->GetLanguageId());
-
-		int restoreTarget = translator->SetGlobalTarget(iHLTVRelay);
-#endif
-
-		DetectExceptions eh(pContext);
-		len = smutils->FormatString(buffer, sizeof(buffer), pContext, params, 2);
-
-#if SOURCE_ENGINE != SE_CSGO
-		pHLTVRelay->SetLanguageId(translator->GetServerLanguage());
-		translator->SetGlobalTarget(restoreTarget);
-#endif
-
-		if (eh.HasException())
-			return 0;
-	}
-
-	pClient->BaseClient()->ClientPrintf("%s\n", buffer);
-
+	PrintToSpectator(pContext, params, [](IClient *client, const char *buffer) {
+		client->ClientPrintf("%s\n", buffer);
+	});
 	return 0;
 }
 

@@ -29,6 +29,7 @@
 * Version: $Id$
 */
 
+#include "core/recording_hooks.h"
 #include "extension.h"
 #include "core/local_hltv_broadcast.h"
 #include "hooks/forwards.h"
@@ -166,8 +167,11 @@ void CForwardManager::Shutdown()
 	m_Initialized = false;
 	RemoveBroadcastLocalChatDetour();
 #ifndef WIN32
-	RemoveStartRecordingDetour();
-	RemoveStopRecordingDetour();
+	sourcetv::recording::RemoveHooks(m_RecordingDetours, [](CDetour *hook) { hook->Destroy(); });
+#else
+	for (auto& entry : m_RecorderHooks)
+		sourcetv::recording::RemoveHooks(entry.second, [](int id) { SH_REMOVE_HOOK_ID(id); });
+	m_RecorderHooks.clear();
 #endif
 	m_RecordingSessions.Reset();
 	plsys->RemovePluginsListener(this);
@@ -196,23 +200,42 @@ void CForwardManager::OnPluginUnloaded(IPlugin *plugin)
 
 void CForwardManager::HookRecorder(IDemoRecorder *recorder)
 {
-	m_RecordingSessions.Attach(recorder);
+	if (m_RecordingSessions.Current(recorder).lifetime)
+		return;
 #ifdef WIN32
-	SH_ADD_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Pre), false);
-	SH_ADD_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Post), true);
-	SH_ADD_HOOK(IDemoRecorder, StopRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStopRecording), false);
-	SH_ADD_HOOK(IDemoRecorder, StopRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStopRecording_Post), true);
+	std::array<int, 4> hooks{};
+	const bool installed = sourcetv::recording::InstallHooks(hooks, [&](std::size_t index) {
+		switch (index) {
+		case 0:
+			return SH_ADD_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Pre), false);
+		case 1:
+			return SH_ADD_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Post), true);
+		case 2:
+			return SH_ADD_HOOK(IDemoRecorder, StopRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStopRecording), false);
+		default:
+			return SH_ADD_HOOK(IDemoRecorder, StopRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStopRecording_Post), true);
+		}
+	}, [](int id) { SH_REMOVE_HOOK_ID(id); });
+	if (installed)
+		m_RecorderHooks.emplace(recorder, hooks);
+#else
+	const bool installed = InstallRecordingDetours();
 #endif
+	if (installed)
+		m_RecordingSessions.Attach(recorder);
+	else
+		smutils->LogError(myself, "SourceTV recorder unavailable: could not install all recording observers.");
 }
 
 void CForwardManager::UnhookRecorder(IDemoRecorder *recorder)
 {
 	m_RecordingSessions.Forget(recorder);
 #ifdef WIN32
-	SH_REMOVE_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Pre), false);
-	SH_REMOVE_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Post), true);
-	SH_REMOVE_HOOK(IDemoRecorder, StopRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStopRecording), false);
-	SH_REMOVE_HOOK(IDemoRecorder, StopRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStopRecording_Post), true);
+	const auto entry = m_RecorderHooks.find(recorder);
+	if (entry != m_RecorderHooks.end()) {
+		sourcetv::recording::RemoveHooks(entry->second, [](int id) { SH_REMOVE_HOOK_ID(id); });
+		m_RecorderHooks.erase(entry);
+	}
 #endif
 }
 
@@ -716,6 +739,8 @@ static recording::Snapshot CaptureRecorder(IDemoRecorder *recorder, bool withTic
 
 void CForwardManager::CallOnStartRecording(IDemoRecorder *recorder, const char *filename, bool bContinuously)
 {
+	if (!m_RecordingSessions.Current(recorder).lifetime)
+		return;
 	const auto frame = m_RecordingSessions.EndStart(recorder);
 	recording::Snapshot effective;
 	if (frame)
@@ -826,57 +851,19 @@ DETOUR_DECL_MEMBER0(DetourHLTVStopRecording, void)
 	g_pSTVForwards.CallOnRecordingFileClosed(recorder);
 }
 
-void CForwardManager::CreateStartRecordingDetour()
+bool CForwardManager::InstallRecordingDetours()
 {
-	if (m_bStartRecordingDetoured)
-		return;
+	if (m_RecordingDetours[0])
+		return true;
 
-	m_DStartRecording = DETOUR_CREATE_MEMBER(DetourHLTVStartRecording, "CHLTVDemoRecorder::StartRecording");
-
-	if (m_DStartRecording != nullptr)
-	{
-		m_DStartRecording->EnableDetour();
-		m_bStartRecordingDetoured = true;
-		return;
-	}
-	smutils->LogError(myself, "CHLTVDemoRecorder::StartRecording detour could not be initialized.");
-	return;
-}
-
-void CForwardManager::RemoveStartRecordingDetour()
-{
-	if (m_DStartRecording != nullptr)
-	{
-		m_DStartRecording->Destroy();
-		m_DStartRecording = nullptr;
-	}
-	m_bStartRecordingDetoured = false;
-}
-
-void CForwardManager::CreateStopRecordingDetour()
-{
-	if (m_bStopRecordingDetoured)
-		return;
-
-	m_DStopRecording = DETOUR_CREATE_MEMBER(DetourHLTVStopRecording, "CHLTVDemoRecorder::StopRecording");
-
-	if (m_DStopRecording != nullptr)
-	{
-		m_DStopRecording->EnableDetour();
-		m_bStopRecordingDetoured = true;
-		return;
-	}
-	smutils->LogError(myself, "CHLTVDemoRecorder::StopRecording detour could not be initialized.");
-	return;
-}
-
-void CForwardManager::RemoveStopRecordingDetour()
-{
-	if (m_DStopRecording != nullptr)
-	{
-		m_DStopRecording->Destroy();
-		m_DStopRecording = nullptr;
-	}
-	m_bStopRecordingDetoured = false;
+	return sourcetv::recording::InstallHooks(m_RecordingDetours, [](std::size_t index) {
+		CDetour *hook;
+		if (index == 0) {
+			hook = DETOUR_CREATE_MEMBER(DetourHLTVStartRecording, "CHLTVDemoRecorder::StartRecording")
+		} else {
+			hook = DETOUR_CREATE_MEMBER(DetourHLTVStopRecording, "CHLTVDemoRecorder::StopRecording")
+		}
+		return sourcetv::recording::EnableRecordingHook(hook);
+	}, [](CDetour *hook) { hook->Destroy(); });
 }
 #endif

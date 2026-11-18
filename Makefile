@@ -32,9 +32,11 @@ help:
 	  'make test-public-api                 Comparar el contrato público congelado' \
 	  'make test-pawn-boundary              Probar traducciones y límites de Pawn en C++' \
 	  'make test-pawn-boundary-vm           Probar límites de memoria en una VM local' \
+	  'make test-native-sanitized           Ejecutar pruebas nativas con ASan y UBSan' \
 	  'make test-native                     Ejecutar pruebas C++ puras (x86 por defecto)' \
 	  'make test-abi                        Ejecutar el probe de ABI Linux x86' \
 	  'make test-coverage                   Medir cobertura local C++ y Python' \
+	  'make test-coverage-tooling           Validar localmente el recibo de cobertura' \
 	  'make test-coexistence                Probar la cadena de hooks con SourceHook x86' \
 	  'make sonar-cppcheck / sonar          Analizar el build Linux localmente' \
 	  'make clean-<linux|windows>            Limpiar la salida de AMBuild' \
@@ -72,6 +74,12 @@ test:
 	$(PYTHON) -B -m unittest discover -s "$(ROOT_DIR)/tests/package"
 
 NATIVE_CXXFLAGS ?= -m32 -std=c++17 -Wall -Wextra
+NATIVE_TESTS := recording_path:natives:test-native recording_sessions:core:recording_sessions hook_context:core:hook_context print_recipient:natives:print_recipient
+NATIVE_SANITIZER_FLAGS := -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=all -fno-pie -no-pie
+
+.PHONY: test-native-sanitized
+test-native-sanitized:
+	$(MAKE) test-native NATIVE_CXXFLAGS="$(NATIVE_CXXFLAGS) $(NATIVE_SANITIZER_FLAGS)"
 
 .PHONY: test-native
 test-native:
@@ -79,16 +87,13 @@ test-native:
 	@set -euo pipefail; \
 	  output="$$(mktemp -d "$(ROOT_DIR)/.build/native.XXXXXX")"; \
 	  printf 'Output: %s\n' "$$output"; \
-	  { $(CXX) --version; printf 'Flags: %s\n' "$(NATIVE_CXXFLAGS)"; } | tee "$$output/toolchain.txt"; \
-	  $(CXX) $(NATIVE_CXXFLAGS) -I"$(ROOT_DIR)/extension/natives" \
-	    "$(ROOT_DIR)/tests/native/recording_path.cpp" -o "$$output/test-native"; \
-	  "$$output/test-native" | tee "$$output/result.txt"; \
-	  $(CXX) $(NATIVE_CXXFLAGS) -I"$(ROOT_DIR)/extension/core" \
-	    "$(ROOT_DIR)/tests/native/recording_sessions.cpp" -o "$$output/recording_sessions"; \
-	  "$$output/recording_sessions" | tee -a "$$output/result.txt"; \
-	  $(CXX) $(NATIVE_CXXFLAGS) -I"$(ROOT_DIR)/extension/core" \
-	    "$(ROOT_DIR)/tests/native/hook_context.cpp" -o "$$output/hook_context"; \
-	  "$$output/hook_context" | tee -a "$$output/result.txt"
+	  { $(CXX) --version; git rev-parse --verify HEAD 2>/dev/null || printf 'Source SHA unavailable\n'; printf 'Flags: %s\n' "$(NATIVE_CXXFLAGS)"; } | tee "$$output/toolchain.txt"; \
+	  for test in $(NATIVE_TESTS); do \
+	    IFS=: read -r source include binary <<< "$$test"; \
+	    $(CXX) $(NATIVE_CXXFLAGS) -I"$(ROOT_DIR)/extension/$$include" \
+	      "$(ROOT_DIR)/tests/native/$$source.cpp" -o "$$output/$$binary"; \
+	    "$$output/$$binary" | tee -a "$$output/result.txt"; \
+	  done
 
 
 .PHONY: test-pawn-boundary
@@ -206,9 +211,15 @@ test-coexistence:
 	  "$$output/connect-coexistence" | tee "$$output/result.txt"
 
 COVERAGE_PYTHON ?= $(PYTHON)
+GCOV ?= gcov
 
 .PHONY: test-coverage
 test-coverage: DEFAULT_BUILD_DIR := $(ROOT_DIR)/.build/linux-l4d2
 test-coverage: PLATFORM := linux
+.PHONY: test-coverage-tooling
+test-coverage-tooling:
+	$(PYTHON) -B -m unittest discover -s "$(ROOT_DIR)/tests/tools"
+
 test-coverage: build-exts-linux
-	$(PYTHON) "$(SCRIPT_DIR)/tools/local_coverage.py" --compile-commands "$(BUILD_DIR)/compile_commands.json" --coverage-python "$(COVERAGE_PYTHON)"
+	$(PYTHON) "$(SCRIPT_DIR)/tools/local_coverage.py" --compile-commands "$(BUILD_DIR)/compile_commands.json" --coverage-python "$(COVERAGE_PYTHON)" \
+	  --cxx="$(CXX)" --native-flags="$(NATIVE_CXXFLAGS)" --native-tests="$(NATIVE_TESTS)" --gcov="$(GCOV)"

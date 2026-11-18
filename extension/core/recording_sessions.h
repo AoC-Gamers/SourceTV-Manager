@@ -244,7 +244,7 @@ template <class Port>
 RecordingStatus ReadStatus(const Sessions& sessions, Port& port, const void* recorder, Plugin plugin, bool readFilename)
 {
 	RecordingStatus status;
-	if (!recorder)
+	if (!sessions.Current(recorder).lifetime)
 		return status;
 
 	status.available = true;

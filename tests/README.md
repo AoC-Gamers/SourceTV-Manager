@@ -17,8 +17,9 @@ anterior en un objeto de prueba. Requiere los SDK locales y multilib de Linux.
 sobre código de producción. En Linux usa un compilador C++17 con multilib
 x86 por defecto. Se puede seleccionar el compilador mediante `CXX` y los flags
 mediante `NATIVE_CXXFLAGS`. Cada ejecución crea su propio directorio en
-`.build/` y guarda el compilador, flags y resultado. La suite es local y no
-requiere SDK ni ejecuta SourceHook, VM o SRCDS.
+`.build/` y guarda el compilador, flags y resultado. La suite pura se ejecuta en CI
+mediante `make test-native-sanitized` con ASan y UBSan. Funciona sin SDK y
+los proveedores controlados se prueban por separado del motor.
 
 Para la frontera Pawn usa `make test-pawn-boundary`. Compila con los headers
 de SourcePawn del checkout `SOURCEMOD_DIR` y usa un contexto controlado.
@@ -57,6 +58,18 @@ motor. El forward de cierre conserva el archivo y tick capturados antes de
 la parada. Los dobles prueban esas decisiones en C++, sin ejecutar callbacks
 SourceHook ni el motor de L4D2. La continuidad entre mapas sigue pendiente
 de prueba funcional.
+
+La instalación de los observadores de grabación se prueba con fallos de
+creación y habilitación en Linux y de registro en Windows. El grabador solo
+se anuncia como disponible para las operaciones gestionadas cuando puede
+observar inicio y cierre. Ante un fallo, se retiran los registros parciales y
+`StartRecordingEx` devuelve `RecorderUnavailable` con token cero. Las
+consultas directas de solo lectura siguen consultando el grabador del motor.
+
+El adaptador de impresión usa dobles para probar slots fuera de rango, relay
+ausente, traducción anidada, fallo de formato y reutilización del receptor.
+Comprueba que se restaure el idioma previo del relay y el destino global.
+La impresión de espectadores conectados se verifica en SRCDS con un cliente.
 
 `make test-native` prueba además buffers independientes de conexión, chat
 anidado por instancia, y restauración del host y del canal al finalizar o

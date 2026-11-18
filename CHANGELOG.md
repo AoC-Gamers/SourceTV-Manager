@@ -12,6 +12,11 @@
 
 ### Corregido
 
+- La grabación gestionada queda indisponible si falla un hook de inicio o
+  cierre. Se retiran los hooks instalados parcialmente.
+- La impresión a espectadores valida el receptor y restaura el idioma previo
+  del relay y el destino de traducción después de formatear.
+
 - **Grabación.** Una operación anidada que reemplaza la sesión invalida las
   acciones pendientes sobre la sesión anterior, incluso con el mismo nombre
   de archivo. Una parada interna sin archivo abierto conserva el inicio y
@@ -30,6 +35,11 @@
   y los forwards de chat usan la misma entrada de gamedata.
 
 ### Desarrollo
+
+- CI ejecuta las regresiones nativas Linux x86 con ASan y UBSan y prueba
+  las fronteras que usan el SDK en el job de compilación.
+- El recibo de cobertura local detecta cambios en headers, dependencias,
+  órdenes, toolchain y pruebas antes de importar los informes.
 
 - Cada push a `develop` publica la prerelease con los ZIP validados de Linux y Windows.
 

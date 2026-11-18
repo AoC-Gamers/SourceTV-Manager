@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "recording_sessions.h"
+#include "recording_hooks.h"
 
 #include <climits>
 #include <cstdio>
@@ -65,8 +66,65 @@ struct Port {
 	}
 };
 
+struct Detour {
+	bool enableWorks = true;
+	bool enabled = false;
+	int destroyed = 0;
+
+	void EnableDetour() { enabled = enableWorks; }
+	bool IsEnabled() const { return enabled; }
+	void Destroy() { ++destroyed; }
+};
+
+static void CheckInstallation()
+{
+	for (bool createStop : {false, true}) {
+		recording::Sessions sessions;
+		Port port;
+		Detour start, stop;
+		stop.enableWorks = false;
+		std::array<Detour*, 2> hooks{};
+		if (recording::InstallHooks(hooks, [&](std::size_t index) {
+			return recording::EnableRecordingHook(index == 0 ? &start : (createStop ? &stop : nullptr));
+		}, [](Detour* hook) { hook->Destroy(); }))
+			sessions.Attach(&port);
+
+		Check(!hooks[0] && !hooks[1] && start.destroyed == 1 && stop.destroyed == createStop,
+			"stop observer creation or enable failure rolls back Linux hooks");
+		char path[32];
+		const recording::Plugin owner{&sessions, 1};
+		const auto snapshot = recording::ReadStatus(sessions, port, &port, owner, true);
+		Check(!snapshot.available && !snapshot.token && snapshot.current.instance == -1,
+			"partial observation reports an unavailable recording snapshot");
+		const auto outcome = recording::Start(sessions, port, &port, owner, true,
+			false, "test.dem", path, sizeof(path));
+		Check(outcome.result == StartResult::RecorderUnavailable && !outcome.token && !port.starts,
+			"partial observation never admits an owned recording");
+
+		stop.enableWorks = true;
+		Check(recording::InstallHooks(hooks, [&](std::size_t index) {
+			return recording::EnableRecordingHook(index == 0 ? &start : &stop);
+		}, [](Detour* hook) { hook->Destroy(); }), "complete Linux observer installation");
+		recording::RemoveHooks(hooks, [](Detour* hook) { hook->Destroy(); });
+		Check(!hooks[0] && !hooks[1], "Linux observer shutdown clears handles");
+	}
+	for (int failed = 1; failed <= 4; ++failed) {
+		std::array<int, 4> hooks{};
+		int expectedRemoval = failed - 1;
+		Check(!recording::InstallHooks(hooks, [&](std::size_t index) {
+			const int id = static_cast<int>(index) + 1;
+			return id == failed ? 0 : id;
+		}, [&](int id) {
+			Check(id == expectedRemoval--, "Windows observer rollback order");
+		}), "every failed Windows observer prevents installation");
+		Check(hooks == std::array<int, 4>{} && expectedRemoval == 0,
+			"all successful Windows registrations were removed");
+	}
+}
+
 int main()
 {
+	CheckInstallation();
 	recording::Sessions state;
 	Port port;
 	const recording::Plugin owner{&state, 4};
