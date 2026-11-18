@@ -2,6 +2,8 @@
 #ifndef SOURCETV_RECORDING_HOOKS_H
 #define SOURCETV_RECORDING_HOOKS_H
 
+#include "recording_sessions.h"
+
 #include <array>
 #include <cstddef>
 
@@ -28,6 +30,22 @@ bool InstallHooks(std::array<Handle, Count>& hooks, Add add, Remove remove)
 			return false;
 		}
 	}
+	return true;
+}
+
+inline bool RecorderAvailable(const Sessions& sessions, const void* recorder)
+{
+	return sessions.Current(recorder).lifetime != 0;
+}
+
+template <typename Install>
+bool RegisterRecorder(Sessions& sessions, const void* recorder, Install install)
+{
+	if (RecorderAvailable(sessions, recorder))
+		return true;
+	if (!recorder || !install())
+		return false;
+	sessions.Attach(recorder);
 	return true;
 }
 

@@ -23,8 +23,8 @@
   su token de propietario. Los cierres preservan el archivo y tick previos.
 
 - **Espectadores.** Las conexiones y el chat anidados tienen contextos
-  independientes. Los rechazos vacíos se inicializan y el texto se trata como
-  datos. La conexión conserva el orden de hooks de SourceHook y los comandos
+  independientes. Los rechazos vacíos se inicializan y los motivos con `%`
+  se muestran completos en L4D2. La conexión conserva el orden de hooks de SourceHook y los comandos
   de SourceTV restauran el host y el canal previos.
 - **Ciclo de vida.** Los forwards de inicio observan una instancia registrada.
   Al cerrar, la extensión retira los hooks de los receptores que registró.

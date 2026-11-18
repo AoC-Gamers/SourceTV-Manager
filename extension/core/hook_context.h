@@ -14,7 +14,8 @@ namespace sourcetv {
 struct ConnectionBuffers
 {
 	std::array<char, 255> password{};
-	std::array<char, 255> rejection{};
+	static constexpr std::size_t RejectionCapacity = 255;
+	std::array<char, RejectionCapacity> rejection{};
 
 	explicit ConnectionBuffers(const char* original)
 	{
@@ -22,6 +23,20 @@ struct ConnectionBuffers
 			for (std::size_t i = 0; i + 1 < password.size() && original[i]; ++i)
 				password[i] = original[i];
 		}
+	}
+
+	// L4D2 formats the received rejection reason before displaying it.
+	auto L4D2RejectionText() const
+	{
+		std::array<char, 2 * (RejectionCapacity - 1) + 1> escaped{};
+		std::size_t length = 0;
+		for (std::size_t i = 0; i + 1 < rejection.size() && rejection[i]; ++i) {
+			const char character = rejection[i];
+			escaped[length++] = character;
+			if (character == '%')
+				escaped[length++] = '%';
+		}
+		return escaped;
 	}
 
 	void Terminate()

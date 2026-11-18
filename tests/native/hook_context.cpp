@@ -17,9 +17,17 @@ int main()
 		inner.Terminate();
 		assert(std::strlen(inner.password.data()) == 254);
 		assert(std::strlen(inner.rejection.data()) == 254);
+		assert(inner.L4D2RejectionText().data() == std::string(508, '%'));
 	}
 	assert(std::strcmp(outer.password.data(), "outer") == 0);
 	assert(outer.rejection[0] == '\0');
+
+	assert(outer.L4D2RejectionText()[0] == '\0');
+	const char reason[] = "SourceTV: prueba al 100% completada.";
+	std::memcpy(outer.rejection.data(), reason, sizeof(reason));
+	const auto encoded = outer.L4D2RejectionText();
+	assert(std::strcmp(encoded.data(), "SourceTV: prueba al 100%% completada.") == 0);
+	assert(std::strcmp(outer.rejection.data(), reason) == 0);
 
 	int firstServer, secondServer, author, guest;
 	sourcetv::SpectatorCommands commands;

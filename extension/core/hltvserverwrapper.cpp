@@ -1,3 +1,4 @@
+#include "core/recording_hooks.h"
 #include "core/hltvserverwrapper.h"
 #include "core/hook_context.h"
 #include "hooks/forwards.h"
@@ -383,7 +384,7 @@ void HLTVServerWrapperManager::AddServer(IHLTVServer *server)
 
 	g_pSTVForwards.CallOnServerStart(server);
 	if (wrapper->IsActive()) {
-		const bool available = g_pSTVForwards.RecordingSessions().Current(wrapper->GetDemoRecorder()).lifetime != 0;
+		const bool available = sourcetv::recording::RecorderAvailable(g_pSTVForwards.RecordingSessions(), wrapper->GetDemoRecorder());
 		wrapper->m_AnnouncedRecorder = available;
 		g_pSTVForwards.CallOnRecorderAvailabilityChanged(wrapper->GetInstanceNumber(), available);
 	}

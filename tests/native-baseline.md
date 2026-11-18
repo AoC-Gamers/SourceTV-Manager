@@ -46,24 +46,20 @@ Se inspeccionó estáticamente una copia local de `engine_srv.so` procedente
 de una captura de SteamWorks. `readelf` confirmó ELF32 i386 y build ID
 `b152439170af081a0d31fc357364a4cd4caa56ac`. SHA-256
 `8f8093a18bba14cb73fc11589687bfb8156b00328b7413d697f1a76ed4b7621a`.
-La versión del juego que corresponde al despliegue actual queda por cotejar.
-Para Windows queda pendiente obtener `engine.dll` PE x86 identificada con
+La copia corresponde a L4D2 2.2.4.3, build 10097. Para Windows se
+identificó una DLL del cliente. Falta el módulo de SRCDS dedicado Windows con
 SHA-256 y versión del juego. La columna Windows describe evidencia de fuente.
 
 | Contrato | Linux x86 | Windows x86 | Verificación pendiente |
 |---|---|---|---|
-| `CHLTVServer::ConnectClient` | `nm -C` muestra el método y un thunk. El símbolo usa `netadr_s&` y vector de objetos `CLC_SplitPlayerConnect`. El hook declara dirección const y vector de punteros. | Existe declaración y selector de gamedata. Módulo sin identificar. | Identificar vtable, objeto receptor, elementos del vector, convenio y retorno. Correlacionar en cada binario y probar SourceHook con proveedor independiente. |
+| `ConnectClient` | Slot 51, ajuste del thunk de −4 y argumentos de pila i386. El binding usa dirección mutable y vector de objetos. | Declaración y selector heredados. ABI dedicada pendiente. | Ejecutar los dos handlers con el motor y un cliente y contrastar el perfil Windows por separado. |
 | `GetBaseServer` y conversiones del servidor | El símbolo y su thunk existen. El SDK devuelve `IServer*`. La llamada local de eventos aplica un ajuste literal y el forward usa otra ruta con fallback. | SDK y ramas de fuente disponibles. Módulo sin identificar. | Trazar el subobjeto de cada ruta, el ajuste efectivo y el receptor de BinTools/SourceHook. Confirmar la llamada original. |
 | `IDemoRecorder`, `CHLTVDemoRecorder` y `CDemoFile` | Los símbolos confirman nombres y parámetros de inicio/parada. El wrapper interpreta el comienzo del archivo como nombre. | Declaraciones locales y gamedata disponibles. Módulo sin identificar. | Confirmar slots, orden de métodos, campo filename y duración de préstamo del archivo. Probar datos tomados antes del cierre. |
 | `IClient`, `CBaseClient`, `CGameClient` y canal temporal `CNetChan` | Contratos observados en el SDK, wrappers y hooks. | Contratos observados en el SDK, wrappers y hooks. | Confirmar bases, receptor virtual, duración de la sustitución y restauración ante reentrada. |
 | `CHLTVDirector` y cámara | Los consumidores y el gamedata describen los campos usados. | Los consumidores y el gamedata describen los campos usados. | Contrastar ancho, offsets y ticks/origen en el módulo identificado antes de cualquier cambio. |
 
-La evidencia de símbolos confirma lo que el símbolo codifica. Quedan abiertas
-las llamadas reales, los layouts de objeto, los slots y el comportamiento
-en SRCDS. Los perfiles se verificarán por separado con módulos identificados,
-proveedores independientes y pruebas de marshalling, base/slot erróneos,
-resolución incompleta y ciclo de vida. En esta fase no se modifican firmas,
-gamedata ni adaptadores ABI.
+La firma Linux L4D2 se contrasta con el módulo dedicado. Las llamadas reales y
+los layouts completos siguen pendientes de aceptación por plataforma.
 
 ### Correlación de receptor y slots en el ELF identificado
 
@@ -73,9 +69,20 @@ el slot 51 del subobjeto `CBaseServer`. La entrada de `CHLTVServer` en
 `CHLTVServer::ConnectClient` suma 4 al receptor antes de llamar a
 `CBaseServer::ConnectClient`. El desensamblado muestra parámetros en la pila
 y retorno en EAX. El símbolo identifica referencias a `netadr_s` mutable y
-a un vector de objetos `CLC_SplitPlayerConnect`. Queda pendiente comprobar
-la llamada de los handlers a través de la cadena de SourceHook con un cliente
-y el acceso a la representación del vector.
+a un vector de objetos `CLC_SplitPlayerConnect`. Se reconfirmaron el hash,
+el build ID y los símbolos con `sha256sum`, `readelf` y `nm`. En el
+desensamblado, `CBaseServer::ConnectClient` carga el noveno argumento de
+`0x2c(%ebp)` y compara su contador en `0xc` (`0xfb07b` y `0xfb088`).
+Coincide con el prefijo de `CUtlVector` del SDK x86 fijado. Dirección y
+vector son préstamos durante la llamada. Los hooks dejan al motor el
+ownership del cliente retornado y del almacenamiento del vector.
+
+El proveedor independiente x86 de `make test-coexistence` en Manager
+valida los diez argumentos, el retorno y la continuación de SourceHook.
+Ese probe usa su propia vtable y un prefijo de vector de prueba. La
+convivencia de los dos handlers productivos y el uso de un cliente real
+siguen pendientes. Ninguno de los dos bindings requiere acceder a los
+elementos del vector.
 
 En la vtable de `CHLTVDemoRecorder`, el address point `0x2a16e8` contiene
 `GetDemoFile` en el slot 0, `GetRecordingTick` en el 1, `StartRecording`
@@ -85,11 +92,14 @@ el subobjeto en `this + 4`, que también recibe `CDemoFile::Close`.
 `CDemoFile::Open` copia el nombre al offset 0 con límite de 260 bytes y
 usa el stream buffer en `0x534` en esa copia del motor. Se requiere
 corroboración separada del tamaño completo de las estructuras y frames.
+El recorder conserva la propiedad de `CDemoFile`. La extensión usa su
+dirección prestada durante la operación y conserva por copia los datos de
+la notificación de cierre que deban sobrevivir a esa operación.
 
 La DLL PE32 x86 de la instalación local del cliente lleva SHA-256
 `8a6d468059394bf4cfce32f11dcba12ef45de88da1373084d5a2916d0bf7ba86`. El
 contrato del SRCDS dedicado Windows sigue pendiente de identificar. Se
-conservan las firmas existentes y los offsets de gamedata de ambas plataformas.
+conservan las firmas Windows y los offsets de gamedata de ambas plataformas.
 
 ## Resultados históricos de la extracción
 

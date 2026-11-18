@@ -84,10 +84,15 @@ static void CheckInstallation()
 		Detour start, stop;
 		stop.enableWorks = false;
 		std::array<Detour*, 2> hooks{};
-		if (recording::InstallHooks(hooks, [&](std::size_t index) {
-			return recording::EnableRecordingHook(index == 0 ? &start : (createStop ? &stop : nullptr));
-		}, [](Detour* hook) { hook->Destroy(); }))
-			sessions.Attach(&port);
+		const auto registerRecorder = [&] {
+			return recording::RegisterRecorder(sessions, &port, [&] {
+				Check(!recording::RecorderAvailable(sessions, &port), "availability must wait for observer installation");
+				return recording::InstallHooks(hooks, [&](std::size_t index) {
+					return recording::EnableRecordingHook(index == 0 ? &start : (createStop ? &stop : nullptr));
+				}, [](Detour* hook) { hook->Destroy(); });
+			});
+		};
+		Check(!registerRecorder(), "partial observer installation cannot register the recorder");
 
 		Check(!hooks[0] && !hooks[1] && start.destroyed == 1 && stop.destroyed == createStop,
 			"stop observer creation or enable failure rolls back Linux hooks");
@@ -102,23 +107,36 @@ static void CheckInstallation()
 			"partial observation never admits an owned recording");
 
 		stop.enableWorks = true;
-		Check(recording::InstallHooks(hooks, [&](std::size_t index) {
-			return recording::EnableRecordingHook(index == 0 ? &start : &stop);
-		}, [](Detour* hook) { hook->Destroy(); }), "complete Linux observer installation");
+		Check(recording::RegisterRecorder(sessions, &port, [&] {
+			return recording::InstallHooks(hooks, [&](std::size_t index) {
+				return recording::EnableRecordingHook(index == 0 ? &start : &stop);
+			}, [](Detour* hook) { hook->Destroy(); });
+		}), "complete Linux observer installation");
+		Check(recording::RecorderAvailable(sessions, &port) &&
+			recording::ReadStatus(sessions, port, &port, owner, false).available,
+			"complete observers publish availability to the managed snapshot");
+		Check(recording::RegisterRecorder(sessions, &port, [] { return false; }),
+			"registering an observed recorder does not reinstall its observers");
+		sessions.Forget(&port);
 		recording::RemoveHooks(hooks, [](Detour* hook) { hook->Destroy(); });
 		Check(!hooks[0] && !hooks[1], "Linux observer shutdown clears handles");
 	}
 	for (int failed = 1; failed <= 4; ++failed) {
+		recording::Sessions sessions;
+		Port port;
 		std::array<int, 4> hooks{};
 		int expectedRemoval = failed - 1;
-		Check(!recording::InstallHooks(hooks, [&](std::size_t index) {
-			const int id = static_cast<int>(index) + 1;
-			return id == failed ? 0 : id;
-		}, [&](int id) {
-			Check(id == expectedRemoval--, "Windows observer rollback order");
+		Check(!recording::RegisterRecorder(sessions, &port, [&] {
+			return recording::InstallHooks(hooks, [&](std::size_t index) {
+				const int id = static_cast<int>(index) + 1;
+				return id == failed ? 0 : id;
+			}, [&](int id) {
+				Check(id == expectedRemoval--, "Windows observer rollback order");
+			});
 		}), "every failed Windows observer prevents installation");
-		Check(hooks == std::array<int, 4>{} && expectedRemoval == 0,
-			"all successful Windows registrations were removed");
+		Check(hooks == std::array<int, 4>{} && expectedRemoval == 0
+			&& !recording::RecorderAvailable(sessions, &port),
+			"rollback removes observers and leaves the recorder unavailable");
 	}
 }
 

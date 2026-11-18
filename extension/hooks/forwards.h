@@ -64,6 +64,16 @@ typedef enum EAuthProtocol
 
 class CGameInfo;
 
+#if SOURCE_ENGINE == SE_LEFT4DEAD || SOURCE_ENGINE == SE_LEFT4DEAD2
+#if SOURCE_ENGINE == SE_LEFT4DEAD2 && !defined WIN32
+using ConnectAddress = netadr_t&;
+using ConnectPlayers = CUtlVector<CLC_SplitPlayerConnect>;
+#else
+using ConnectAddress = const netadr_t&;
+using ConnectPlayers = CUtlVector<CLC_SplitPlayerConnect*>;
+#endif
+#endif
+
 class CForwardManager : public IPluginsListener
 {
 public:
@@ -120,7 +130,7 @@ private:
 #elif SOURCE_ENGINE == SE_LEFT4DEAD || SOURCE_ENGINE == SE_LEFT4DEAD2
 	void OnStopRecording();
 	void OnStopRecording_Post();
-	IClient *OnSpectatorConnect(const netadr_t & address, int nProtocol, int iChallenge, int iClientChallenge, const char * pchName, const char * pchPassword, const char * pCookie, int, CUtlVector<CLC_SplitPlayerConnect *> &pSplitPlayerConnectVector, bool bUnknown);
+	IClient *OnSpectatorConnect(ConnectAddress address, int nProtocol, int iChallenge, int nAuthProtocol, const char *pchName, const char *pchPassword, const char *pCookie, int cbCookie, ConnectPlayers &players, bool bUnknown);
 #else
 	void OnStopRecording();
 	void OnStopRecording_Post();

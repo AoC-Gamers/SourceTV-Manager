@@ -60,7 +60,7 @@ SH_DECL_MANUALHOOK1_void(CBaseClient_Disconnect, 0, 0, 0, const char *);
 #endif // !WIN32
 
 #elif SOURCE_ENGINE == SE_LEFT4DEAD || SOURCE_ENGINE == SE_LEFT4DEAD2
-SH_DECL_MANUALHOOK10(CHLTVServer_ConnectClient, 0, 0, 0, IClient *, const netadr_t &, int, int, int, const char *, const char *, const char *, int, CUtlVector<CLC_SplitPlayerConnect *> &, bool);
+SH_DECL_MANUALHOOK10(CHLTVServer_ConnectClient, 0, 0, 0, IClient *, ConnectAddress, int, int, int, const char *, const char *, const char *, int, ConnectPlayers &, bool);
 SH_DECL_MANUALHOOK1_void_vafmt(CHLTVServer_RejectConnection, 0, 0, 0, const netadr_t &);
 SH_DECL_HOOK0_void_vafmt(IClient, Disconnect, SH_NOATTRIB, 0);
 #ifndef WIN32
@@ -200,30 +200,28 @@ void CForwardManager::OnPluginUnloaded(IPlugin *plugin)
 
 void CForwardManager::HookRecorder(IDemoRecorder *recorder)
 {
-	if (m_RecordingSessions.Current(recorder).lifetime)
-		return;
+	if (!sourcetv::recording::RegisterRecorder(m_RecordingSessions, recorder, [&] {
 #ifdef WIN32
-	std::array<int, 4> hooks{};
-	const bool installed = sourcetv::recording::InstallHooks(hooks, [&](std::size_t index) {
-		switch (index) {
-		case 0:
-			return SH_ADD_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Pre), false);
-		case 1:
-			return SH_ADD_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Post), true);
-		case 2:
-			return SH_ADD_HOOK(IDemoRecorder, StopRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStopRecording), false);
-		default:
-			return SH_ADD_HOOK(IDemoRecorder, StopRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStopRecording_Post), true);
-		}
-	}, [](int id) { SH_REMOVE_HOOK_ID(id); });
-	if (installed)
-		m_RecorderHooks.emplace(recorder, hooks);
+		std::array<int, 4> hooks{};
+		const bool installed = sourcetv::recording::InstallHooks(hooks, [&](std::size_t index) {
+			switch (index) {
+			case 0:
+				return SH_ADD_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Pre), false);
+			case 1:
+				return SH_ADD_HOOK(IDemoRecorder, StartRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStartRecording_Post), true);
+			case 2:
+				return SH_ADD_HOOK(IDemoRecorder, StopRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStopRecording), false);
+			default:
+				return SH_ADD_HOOK(IDemoRecorder, StopRecording, recorder, SH_MEMBER(this, &CForwardManager::OnStopRecording_Post), true);
+			}
+		}, [](int id) { SH_REMOVE_HOOK_ID(id); });
+		if (installed)
+			m_RecorderHooks.emplace(recorder, hooks);
+		return installed;
 #else
-	const bool installed = InstallRecordingDetours();
+		return InstallRecordingDetours();
 #endif
-	if (installed)
-		m_RecordingSessions.Attach(recorder);
-	else
+	}))
 		smutils->LogError(myself, "SourceTV recorder unavailable: could not install all recording observers.");
 }
 
@@ -370,7 +368,7 @@ static bool ExtractPlayerName(CUtlVector<NetMsg_SplitPlayerConnect *> &pSplitPla
 // CHLTVServer::ConnectClient(ns_address const&, int, int, int, char const*, char const*, char const*, int, CUtlVector<CNetMessagePB<16, CCLCMsg_SplitPlayerConnect, 0, true> *, CUtlMemory<CNetMessagePB<16, CCLCMsg_SplitPlayerConnect, 0, true> *, int>> &, bool, CrossPlayPlatform_t, unsigned char const*, int)
 IClient *CForwardManager::OnSpectatorConnect(const netadr_t & address, int nProtocol, int iChallenge, int nAuthProtocol, const char *pchName, const char *pchPassword, const char *pCookie, int cbCookie, CUtlVector<NetMsg_SplitPlayerConnect *> &pSplitPlayerConnectVector, bool bUnknown, CrossPlayPlatform_t platform, const unsigned char *pUnknown, int iUnknown)
 #elif SOURCE_ENGINE == SE_LEFT4DEAD || SOURCE_ENGINE == SE_LEFT4DEAD2
-IClient *CForwardManager::OnSpectatorConnect(const netadr_t & address, int nProtocol, int iChallenge, int nAuthProtocol, const char *pchName, const char *pchPassword, const char *pCookie, int cbCookie, CUtlVector<CLC_SplitPlayerConnect *> &pSplitPlayerConnectVector, bool bUnknown)
+IClient *CForwardManager::OnSpectatorConnect(ConnectAddress address, int nProtocol, int iChallenge, int nAuthProtocol, const char *pchName, const char *pchPassword, const char *pCookie, int cbCookie, ConnectPlayers &pSplitPlayerConnectVector, bool bUnknown)
 #else
 IClient *CForwardManager::OnSpectatorConnect(netadr_t & address, int nProtocol, int iChallenge, int iClientChallenge, int nAuthProtocol, const char *pchName, const char *pchPassword, const char *pCookie, int cbCookie)
 #endif
@@ -410,7 +408,10 @@ IClient *CForwardManager::OnSpectatorConnect(netadr_t & address, int nProtocol, 
 	{
 		if (m_bHasRejectConnectionOffset)
 		{
-#if SOURCE_ENGINE == SE_CSGO || SOURCE_ENGINE == SE_LEFT4DEAD || SOURCE_ENGINE == SE_LEFT4DEAD2
+#if SOURCE_ENGINE == SE_LEFT4DEAD2
+			const auto rejection = buffers.L4D2RejectionText();
+			SH_MCALL(server, CHLTVServer_RejectConnection)(address, "%s", rejection.data());
+#elif SOURCE_ENGINE == SE_CSGO || SOURCE_ENGINE == SE_LEFT4DEAD
 			SH_MCALL(server, CHLTVServer_RejectConnection)(address, "%s", buffers.rejection.data());
 #else
 			SH_MCALL(server, CHLTVServer_RejectConnection)(address, iClientChallenge, buffers.rejection.data());
