@@ -12,10 +12,12 @@ services:
     volumes:
       - .:/workspace:ro
       - ./.build:/output
+      - ./dist:/dist
     command:
       - make
-      - build-linux
-      - package-linux
+      - build-exts-linux
+      - package-exts-linux
       - DEPS_DIR=/opt/sm-deps
       - BUILD_DIR=/output/linux-l4d2
       - VENV_DIR=/opt/sm-deps/.venv
+      - DIST_DIR=/dist

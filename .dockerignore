@@ -1,3 +1,5 @@
 *
 !Dockerfile.build
-!build-deps.lock
+!scripts/deps/build-deps.lock
+!Makefile
+!scripts/deps/fetch-native.py

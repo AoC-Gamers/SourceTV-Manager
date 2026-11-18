@@ -246,3 +246,12 @@ build*/
 vs/
 msvc*/
 *.smx
+
+/.env.secret
+__pycache__/
+
+!/docs/build/
+!/scripts/build/
+/.env.*
+!/.env.example
+!/.env.secret.example

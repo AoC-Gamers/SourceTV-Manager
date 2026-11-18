@@ -14,27 +14,9 @@ RUN dpkg --add-architecture i386 \
         python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-COPY build-deps.lock /tmp/build-deps.lock
-
-RUN set -eu; \
-    . /tmp/build-deps.lock; \
-    mkdir -p /opt/sm-deps; \
-    git clone --no-checkout https://github.com/alliedmodders/hl2sdk.git /opt/sm-deps/hl2sdk-l4d2; \
-    git -C /opt/sm-deps/hl2sdk-l4d2 fetch --depth 1 origin "$HL2SDK_COMMIT"; \
-    git -C /opt/sm-deps/hl2sdk-l4d2 checkout --detach "$HL2SDK_COMMIT"; \
-    git clone --no-checkout https://github.com/alliedmodders/sourcemod.git /opt/sm-deps/sourcemod-1.12; \
-    git -C /opt/sm-deps/sourcemod-1.12 fetch --depth 1 origin "$SOURCEMOD_COMMIT"; \
-    git -C /opt/sm-deps/sourcemod-1.12 checkout --detach "$SOURCEMOD_COMMIT"; \
-    git -C /opt/sm-deps/sourcemod-1.12 submodule update --init --recursive --depth 1; \
-    git clone --no-checkout https://github.com/alliedmodders/metamod-source.git /opt/sm-deps/mmsource-1.12; \
-    git -C /opt/sm-deps/mmsource-1.12 fetch --depth 1 origin "$MMSOURCE_COMMIT"; \
-    git -C /opt/sm-deps/mmsource-1.12 checkout --detach "$MMSOURCE_COMMIT"; \
-    git -C /opt/sm-deps/mmsource-1.12 submodule update --init --recursive --depth 1; \
-    git clone --no-checkout https://github.com/alliedmodders/ambuild.git /opt/sm-deps/ambuild; \
-    git -C /opt/sm-deps/ambuild fetch --depth 1 origin "$AMBUILD_COMMIT"; \
-    git -C /opt/sm-deps/ambuild checkout --detach "$AMBUILD_COMMIT"; \
-    python3 -m venv /opt/sm-deps/.venv; \
-    /opt/sm-deps/.venv/bin/python -m pip install --no-cache-dir /opt/sm-deps/ambuild; \
-    rm -f /tmp/build-deps.lock
+COPY Makefile /tmp/aoc-native-toolchain/Makefile
+COPY scripts/deps/build-deps.lock scripts/deps/fetch-native.py /tmp/aoc-native-toolchain/scripts/deps/
+RUN make -C /tmp/aoc-native-toolchain deps-exts-linux DEPS_DIR=/opt/sm-deps \
+    && rm -rf /tmp/aoc-native-toolchain
 
 WORKDIR /workspace

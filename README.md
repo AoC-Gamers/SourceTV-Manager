@@ -11,7 +11,7 @@ There are natives and forwards to access
   * Forcing camera shots on the director
   * Demo recording (filename, recording tick, print message to demo console)
 
-Have a look at the [include file](scripting/include/sourcetvmanager.inc).
+Have a look at the [include file](addons/sourcemod/scripting/include/sourcetvmanager.inc).
 
 #### Recording lifecycle API
 
@@ -53,21 +53,11 @@ inactive, ownership ends. It never assigns the old token to a later recording,
 including across map transitions; L4D2 continuity and segment rotation need a
 runtime smoke before they can be promised.
 
-## Building
+## Building and installing
 
-The extension targets Linux x86 for Left 4 Dead 2. See
-[docs/BUILD_SYSTEM.md](docs/BUILD_SYSTEM.md) for the local build layout and
-commands:
-
-```bash
-make deps-linux
-make build-linux
-```
-
-To build and verify the package in the pinned Docker toolchain instead, run
-`make build-linux-container`. The container writes the same package layout
-under `.build/linux-l4d2/` without connecting to a game server. See
-[docs/BUILD_SYSTEM.md](docs/BUILD_SYSTEM.md) for details.
+Use the [build guide](docs/build/README.md) for native x86 builds and ZIPs.
+See the [installation guide](docs/installation/README.md) for the server layout
+and the [documentation index](docs/README.md) for dependency details.
 
 #### Steam authentication for spectators
 The extension adds a convar `tv_force_steamauth` (defaults to 0) which lets you enable steam validation on SourceTV clients.

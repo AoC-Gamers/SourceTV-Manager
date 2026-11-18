@@ -4,6 +4,9 @@
 public void OnPluginStart()
 {
 	LoadTranslations("common.phrases");
+	RegServerCmd("stv_test_start_owned", Cmd_StartOwnedRecording);
+	RegServerCmd("stv_test_stop_owned", Cmd_StopOwnedRecording);
+	RegServerCmd("stv_test_snapshot", Cmd_RecordingSnapshot);
 
 	RegConsoleCmd("sm_servercount", Cmd_GetServerCount);
 	RegConsoleCmd("sm_selectserver", Cmd_SelectServer);
@@ -51,7 +54,7 @@ public void SourceTV_OnStopRecording(int instance, const char[] filename, int re
 
 public bool SourceTV_OnSpectatorPreConnect(const char[] name, char password[255], const char[] ip, char rejectReason[255])
 {
-	PrintToServer("SourceTV spectator is connecting! Name: %s, pw: %s, ip: %s", name, password, ip);
+	PrintToServer("SourceTV spectator is connecting.");
 	if (StrEqual(password, "nope", false))
 	{
 		strcopy(rejectReason, 255, "Heh, that password sucks.");
@@ -492,4 +495,61 @@ public Action Cmd_SetTVTitle(int client, int args)
 	SourceTV_SetClientTVTitle(iTarget, "%s", sMsg);
 	ReplyToCommand(client, "SourceTV set stream title of spectator %d to %s", iTarget, sMsg);
 	return Plugin_Handled;
+}
+public Action Cmd_StartOwnedRecording(int argc)
+{
+	if (argc != 1)
+	{
+		PrintToServer("Usage: stv_test_start_owned <demo-name>");
+		return Plugin_Handled;
+	}
+
+	char filename[PLATFORM_MAX_PATH];
+	GetCmdArg(1, filename, sizeof(filename));
+
+	int ownerToken;
+	SourceTVRecordingStartResult result = SourceTV_StartRecordingEx(filename, false, ownerToken);
+	PrintToServer("[SourceTV test] Start result %d, owner token %d", result, ownerToken);
+	return Plugin_Handled;
+}
+
+public Action Cmd_StopOwnedRecording(int argc)
+{
+	if (argc != 1)
+	{
+		PrintToServer("Usage: stv_test_stop_owned <token>");
+		return Plugin_Handled;
+	}
+
+	char tokenArg[16];
+	GetCmdArg(1, tokenArg, sizeof(tokenArg));
+	int ownerToken = StringToInt(tokenArg);
+	PrintToServer("[SourceTV test] Stop result %d", SourceTV_StopOwnedRecording(ownerToken));
+	return Plugin_Handled;
+}
+
+public Action Cmd_RecordingSnapshot(int argc)
+{
+	bool recording;
+	int ownerToken, instance, tick;
+	char filename[PLATFORM_MAX_PATH];
+	bool available = SourceTV_GetRecordingSnapshot(recording, ownerToken, instance, filename, sizeof(filename), tick);
+	PrintToServer("[SourceTV test] Available %d, recording %d, token %d, instance %d, tick %d, file %s",
+		available, recording, ownerToken, instance, tick, filename);
+	return Plugin_Handled;
+}
+
+public void SourceTV_OnRecorderAvailabilityChanged(int instance, bool available)
+{
+	PrintToServer("[SourceTV test] Recorder %d availability %d", instance, available);
+}
+
+public void SourceTV_OnRecordingFileStarted(int instance, const char[] filename, bool continuous)
+{
+	PrintToServer("[SourceTV test] Recorder %d started %s, continuous %d", instance, filename, continuous);
+}
+
+public void SourceTV_OnRecordingFileClosed(int instance, const char[] filename, int finalTick)
+{
+	PrintToServer("[SourceTV test] Recorder %d closed %s at tick %d", instance, filename, finalTick);
 }

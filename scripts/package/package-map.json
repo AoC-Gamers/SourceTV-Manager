@@ -1,0 +1,24 @@
+{
+  "name": "sourcetvmanager",
+  "build": {
+    "sdks": [
+      "l4d2"
+    ],
+    "arch": "x86"
+  },
+  "artifact": {
+    "binaries": [
+      "addons/sourcemod/extensions/sourcetvmanager.ext.2.l4d2"
+    ],
+    "resources": [
+      "addons/sourcemod/gamedata/sourcetvmanager.games.txt",
+      "addons/sourcemod/scripting/include/sourcetvmanager.inc"
+    ],
+    "documentation": {
+      "LICENSE": "LICENSE",
+      "NOTICE.md": "NOTICE.md",
+      "README.md": "docs/installation/README.md",
+      "CHANGELOG.md": "CHANGELOG.md"
+    }
+  }
+}
