@@ -1,6 +1,8 @@
 # Pruebas de SourceTV-Manager
 
-`make test-ci` ejecuta las pruebas del contrato de empaquetado.
+`make test-ci` comprueba procedencia de dependencias, esquema y contenido
+del paquete, y el rechazo de entradas inválidas antes de publicar. Usa checkouts
+temporales y dobles del publicador, sin descargas ni Sonar.
 
 Para el diagnóstico de grabación, ejecuta
 `make build-diagnostics SPCOMP=/ruta/a/spcomp SPCOMP_INCLUDE_DIR=/ruta/a/include`

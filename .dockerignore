@@ -3,3 +3,4 @@
 !scripts/deps/build-deps.lock
 !Makefile
 !scripts/deps/fetch-native.py
+!scripts/deps/provenance.py

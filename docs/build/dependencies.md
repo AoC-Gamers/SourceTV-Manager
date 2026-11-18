@@ -11,6 +11,19 @@ La interfaz pública SourcePawn está en
 El servidor necesita SourceMod y Metamod:Source. El gamedata acompaña al binario
 y debe corresponder a la versión del juego.
 
+## Verificación del build y del paquete
+
+Los SDK de Git y AMBuild deben ser checkouts completos de las revisiones del
+lock, con submódulos inicializados y el árbol limpio, incluidos archivos
+ignorados. Un directorio de fuentes sin metadatos Git no acredita esas
+revisiones. El build ejecuta AMBuild desde su checkout fijado con el intérprete
+de `VENV_DIR`. Si usas rutas alternativas (`SOURCEMOD_DIR`, `MMSOURCE_DIR`,
+`HL2SDK_DIR` o `AMBUILD_DIR`), pásalas también a los targets de empaquetado
+y validación. Los recibos antiguos deben regenerarse con un nuevo build.
+
+El checkout del proyecto debe conservar su gitlink de SafetyHook. En el
+contenedor esa revisión se valida en el árbol montado del proyecto.
+
 ## Uso y distribución
 
 | Dependencia | Uso | Distribución |

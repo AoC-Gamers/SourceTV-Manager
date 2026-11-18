@@ -15,8 +15,9 @@ RUN dpkg --add-architecture i386 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY Makefile /tmp/aoc-native-toolchain/Makefile
-COPY scripts/deps/build-deps.lock scripts/deps/fetch-native.py /tmp/aoc-native-toolchain/scripts/deps/
+COPY scripts/deps/build-deps.lock scripts/deps/fetch-native.py scripts/deps/provenance.py /tmp/aoc-native-toolchain/scripts/deps/
 RUN make -C /tmp/aoc-native-toolchain deps-exts-linux DEPS_DIR=/opt/sm-deps \
+    && find /opt/sm-deps -name .git -prune -exec sh -c 'git config --system --add safe.directory "$(dirname "$1")"' sh '{}' \; \
     && rm -rf /tmp/aoc-native-toolchain
 
 WORKDIR /workspace

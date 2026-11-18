@@ -7,6 +7,7 @@ DEPS_DIR ?= $(ROOT_DIR)/.deps/exts-$(PLATFORM)
 SOURCEMOD_DIR ?= $(DEPS_DIR)/sourcemod-1.12
 MMSOURCE_DIR ?= $(DEPS_DIR)/mmsource-1.12
 HL2SDK_DIR ?= $(DEPS_DIR)/hl2sdk-l4d2
+AMBUILD_DIR ?= $(DEPS_DIR)/ambuild
 VENV_DIR ?= $(DEPS_DIR)/.venv
 DIST_DIR ?= $(ROOT_DIR)/dist
 RELEASE_CHANNEL ?= develop
@@ -35,13 +36,15 @@ help:
 deps-exts-linux deps-exts-windows:
 	$(PYTHON) "$(SCRIPT_DIR)/deps/fetch-native.py" --deps "$(DEPS_DIR)" --venv "$(VENV_DIR)"
 
+NATIVE_INPUTS = --sourcemod "$(SOURCEMOD_DIR)" --metamod "$(MMSOURCE_DIR)" \
+                --hl2sdk "$(HL2SDK_DIR)" --ambuild "$(AMBUILD_DIR)"
+
 build-exts-linux build-exts-windows:
 	$(PYTHON) "$(SCRIPT_DIR)/build/build-native.py" "$(PLATFORM)" \
-	  --build "$(BUILD_DIR)" --sourcemod "$(SOURCEMOD_DIR)" --metamod "$(MMSOURCE_DIR)" \
-	  --hl2sdk "$(HL2SDK_DIR)" --venv "$(VENV_DIR)"
+	  --build "$(BUILD_DIR)" --venv "$(VENV_DIR)" $(NATIVE_INPUTS)
 
 ARTIFACT_TOOL = $(PYTHON) "$(SCRIPT_DIR)/package/artifact_contract.py"
-ARTIFACT_ARGS = "$(PLATFORM)" --build "$(BUILD_DIR)" --dist "$(DIST_DIR)" --channel "$(RELEASE_CHANNEL)"
+ARTIFACT_ARGS = "$(PLATFORM)" --build "$(BUILD_DIR)" --dist "$(DIST_DIR)" --channel "$(RELEASE_CHANNEL)" $(NATIVE_INPUTS)
 
 package-exts-linux package-exts-windows:
 	$(ARTIFACT_TOOL) stage $(ARTIFACT_ARGS)
@@ -55,7 +58,7 @@ validate-artifact-linux validate-artifact-windows:
 test-ci: test
 
 test:
-	$(PYTHON) -B "$(ROOT_DIR)/tests/package/test_artifact_contract.py"
+	$(PYTHON) -B -m unittest discover -s "$(ROOT_DIR)/tests/package"
 
 sonar:
 	$(PYTHON) "$(SCRIPT_DIR)/tools/make_sonar.py" analyze --compile-commands "$(BUILD_DIR)/compile_commands.json"

@@ -53,11 +53,26 @@ inactive, ownership ends. It never assigns the old token to a later recording,
 including across map transitions; L4D2 continuity and segment rotation need a
 runtime smoke before they can be promised.
 
-## Building and installing
+## Instalación y compilación
 
-Use the [build guide](docs/build/README.md) for native x86 builds and ZIPs.
-See the [installation guide](docs/installation/README.md) for the server layout
-and the [documentation index](docs/README.md) for dependency details.
+El paquete contiene la extensión para Left 4 Dead 2 x86, su gamedata y
+el include para plugins SourcePawn.
+
+1. Instala Metamod:Source y SourceMod en el servidor.
+2. Copia el árbol `addons/` del ZIP de la plataforma a `left4dead2/`.
+3. Comprueba con `sm exts list` que SourceTV Manager carga.
+4. Para compilar un plugin consumidor, usa `sourcetvmanager.inc` desde
+   `addons/sourcemod/scripting/include/`.
+
+Consulta la [guía de compilación](docs/build/README.md) y el
+[índice de documentación](docs/README.md).
+
+### Actualización y reversión
+
+Detén SRCDS y guarda los binarios y recursos SourceTV de la instalación actual.
+Copia el árbol `addons/` del ZIP nuevo al directorio del juego y repite la
+comprobación de carga. Para revertir, detén el servidor, restaura esos archivos desde la copia y
+retira los archivos añadidos por la actualización antes de volver a iniciar SRCDS.
 
 #### Steam authentication for spectators
 The extension adds a convar `tv_force_steamauth` (defaults to 0) which lets you enable steam validation on SourceTV clients.

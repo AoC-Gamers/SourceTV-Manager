@@ -28,7 +28,10 @@ Si queda vacía o el repositorio pierde acceso a la variable, la validación
 previa falla con un mensaje antes de asignar el runner de compilación.
 
 GitHub Actions ejecuta las pruebas del contrato y compila en Linux y Windows.
-El recibo de compilación vincula los binarios a sus SHA-256. El ZIP identifica la revisión o las fuentes locales usadas.
+El recibo de compilación vincula las fuentes, las dependencias efectivas y
+los binarios mediante SHA-256. El ZIP incluye el README del proyecto e
+identifica la revisión o las fuentes locales usadas. Los enlaces a la guía
+de compilación apuntan al commit base cuando el build contiene cambios locales.
 Los ZIP de runs de `develop` usan el canal Develop. Los runs de `master` o
 `main` usan Latest. Actions conserva los ZIP como artefactos verificables
 del run. El target `release-*` genera el archivo local. Los tags `v*` generan
@@ -55,8 +58,9 @@ servidor SonarQube y la cobertura nativa requieren sus propias ejecuciones. CI e
 
 `make build-linux-container` prepara SafetyHook e invoca Compose con un
 toolchain Linux x86 fijado. El contenedor compila y prepara el staging con la
-red deshabilitada. Usa luego `make release-linux` y
-`make validate-artifact-linux` para crear y verificar el ZIP.
+red deshabilitada. Para crear y verificar el ZIP desde el host, prepara primero
+las mismas dependencias con `make deps-exts-linux` y después ejecuta
+`make release-linux` y `make validate-artifact-linux`.
 
 Las rutas por defecto son `.build/linux-l4d2/` y `dist/linux/artifact/`.
 Se conservan los alias Linux `deps-linux`, `build-linux` y `package-linux`.
