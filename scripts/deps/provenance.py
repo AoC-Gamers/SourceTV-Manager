@@ -19,8 +19,12 @@ NATIVE_REVISIONS = {
 
 
 def read_lock():
-    return dict(line.split("=", 1) for line in LOCK_PATH.read_text().splitlines()
-                if line and not line.startswith("#"))
+    lock = {}
+    for line in LOCK_PATH.read_text().splitlines():
+        if line and not line.startswith("#"):
+            key, value = line.split("=", 1)
+            lock[key] = value
+    return lock
 
 
 def git(path, *args):
@@ -50,6 +54,16 @@ def blob_id(data):
     return digest.hexdigest()
 
 
+def locked_blob_digest(entry, oid):
+    # Reject links even if tracked: the locked SDKs only need normal files.
+    if not stat.S_ISREG(entry.lstat().st_mode) or entry.resolve() != entry:
+        raise ValueError(f"{entry}: se requiere un archivo normal dentro del checkout.")
+    data = entry.read_bytes()
+    if blob_id(data) != oid and blob_id(data.replace(b"\r\n", b"\n")) != oid:
+        raise ValueError(f"{entry}: el contenido difiere del objeto fijado por Git.")
+    return hashlib.sha256(data).digest()
+
+
 def checkout_identity(path, revision):
     path = path.resolve()
     if not (path / ".git").exists():
@@ -74,13 +88,7 @@ def checkout_identity(path, revision):
         if mode == b"160000":
             digest.update(bytes.fromhex(checkout_identity(entry, oid)["sha256"]))
         else:
-            # Reject links even if tracked: our locked SDKs only need normal files.
-            if not stat.S_ISREG(entry.lstat().st_mode) or entry.resolve() != entry:
-                raise ValueError(f"{entry}: se requiere un archivo normal dentro del checkout.")
-            data = entry.read_bytes()
-            if blob_id(data) != oid and blob_id(data.replace(b"\r\n", b"\n")) != oid:
-                raise ValueError(f"{entry}: el contenido difiere del objeto fijado por Git.")
-            digest.update(hashlib.sha256(data).digest())
+            digest.update(locked_blob_digest(entry, oid))
     return {"revision": revision, "sha256": digest.hexdigest()}
 
 

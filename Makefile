@@ -52,6 +52,13 @@ build-exts-linux build-exts-windows:
 	$(PYTHON) "$(SCRIPT_DIR)/build/build-native.py" "$(PLATFORM)" \
 	  --build "$(BUILD_DIR)" --venv "$(VENV_DIR)" $(NATIVE_INPUTS)
 
+.PHONY: build-coverage-linux
+build-coverage-linux: PLATFORM := linux
+build-coverage-linux: DEFAULT_BUILD_DIR := $(ROOT_DIR)/.build/runtime-coverage
+build-coverage-linux:
+	$(PYTHON) "$(SCRIPT_DIR)/build/build-native.py" "linux" --coverage \
+	  --build "$(BUILD_DIR)" --venv "$(VENV_DIR)" $(NATIVE_INPUTS)
+
 ARTIFACT_TOOL = $(PYTHON) "$(SCRIPT_DIR)/package/artifact_contract.py"
 ARTIFACT_ARGS = "$(PLATFORM)" --build "$(BUILD_DIR)" --dist "$(DIST_DIR)" --channel "$(RELEASE_CHANNEL)" $(NATIVE_INPUTS)
 
@@ -226,4 +233,5 @@ test-coverage-tooling:
 
 test-coverage: build-exts-linux
 	$(PYTHON) "$(SCRIPT_DIR)/tools/local_coverage.py" --compile-commands "$(BUILD_DIR)/compile_commands.json" --coverage-python "$(COVERAGE_PYTHON)" \
-	  --cxx="$(CXX)" --native-flags="$(NATIVE_CXXFLAGS)" --native-tests="$(NATIVE_TESTS)" --gcov="$(GCOV)"
+	  --cxx="$(CXX)" --native-flags="$(NATIVE_CXXFLAGS)" --native-tests="$(NATIVE_TESTS)" --gcov="$(GCOV)" \
+	  $(if $(COVERAGE_RUNTIME_BUILD),--runtime-build "$(COVERAGE_RUNTIME_BUILD)")

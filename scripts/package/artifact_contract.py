@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT / "scripts/deps"))
 from provenance import add_input_arguments, dependency_identities
 
 REPOSITORY = "https://github.com/AoC-Gamers/SourceTV-Manager"
+PRODUCT_README = "README.md"
 
 
 def unique_map_keys(pairs):
@@ -117,10 +118,10 @@ def validate_map(mapping, root=ROOT):
     for value in (binaries, resources):
         if not isinstance(value, list) or any(not isinstance(entry, str) for entry in value):
             raise ValueError("Mapa: binaries y resources requieren listas de rutas.")
-    require_keys(docs, {"LICENSE", "NOTICE.md", "README.md", "CHANGELOG.md"}, "documentation")
+    require_keys(docs, {"LICENSE", "NOTICE.md", PRODUCT_README, "CHANGELOG.md"}, "documentation")
     if any(not isinstance(source, str) for source in docs.values()):
         raise ValueError("Mapa: las fuentes de documentation deben ser rutas.")
-    if docs["README.md"] != "README.md":
+    if docs[PRODUCT_README] != PRODUCT_README:
         raise ValueError("Mapa: el README del paquete debe venir de README.md raíz.")
     check_paths(docs.values())
     for suffix in (".so", ".dll"):
@@ -179,7 +180,7 @@ def git_commit(*, require_clean=True):
     return head.stdout.strip() if head.returncode == 0 else None
 
 
-def record_build(build, platform, digest, dependencies, mapping):
+def record_build(build, platform, digest, dependencies, mapping, *, coverage=False):
     receipt = {
         "platform": platform,
         "sources": digest,
@@ -187,6 +188,8 @@ def record_build(build, platform, digest, dependencies, mapping):
         "commit": git_commit(),
         "binaries": binary_hashes(build, platform, mapping),
     }
+    if coverage:
+        receipt["coverage"] = True
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=build, delete=False) as output:
         pending = Path(output.name)
         json.dump(receipt, output, sort_keys=True)
@@ -196,9 +199,7 @@ def record_build(build, platform, digest, dependencies, mapping):
         pending.unlink(missing_ok=True)
 
 
-def products(build, platform, inputs, mapping, *, with_receipt=False):
-    validate_map(mapping)
-    artifact = mapping["artifact"]
+def read_build_receipt(build, platform, inputs):
     receipt_path = build / ".build-complete"
     try:
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -207,8 +208,17 @@ def products(build, platform, inputs, mapping, *, with_receipt=False):
     if not isinstance(receipt, dict) or receipt.get("platform") != platform or receipt.get("sources") != source_digest():
         raise ValueError(f"El build quedó obsoleto. Ejecuta make build-exts-{platform}.")
 
+    if receipt.get("coverage"):
+        raise ValueError("Un build instrumentado para cobertura no se puede empaquetar.")
     if receipt.get("dependencies") != dependency_identities(inputs):
         raise ValueError(f"Cambiaron las dependencias del recibo. Ejecuta make build-exts-{platform}.")
+    return receipt
+
+
+def products(build, platform, inputs, mapping, *, with_receipt=False):
+    validate_map(mapping)
+    artifact = mapping["artifact"]
+    receipt = read_build_receipt(build, platform, inputs)
 
     files = {}
     expected = receipt.get("binaries")
@@ -289,12 +299,21 @@ def release_documents(files, receipt, platform, channel):
         return f"{REPOSITORY}/blob/{link_commit}/{quote(path)}{fragment or ''}"
 
     documents = {}
-    for name in ("README.md", "CHANGELOG.md"):
+    for name in (PRODUCT_README, "CHANGELOG.md"):
         title, _, body = files[name].decode("utf-8").partition("\n")
         body = re.sub(r"(?<=\]\()(docs/[A-Za-z0-9_./-]+)(#[^ )]+)?(?=\))",
                       resolve_docs_link, body)
         documents[name] = f"{title}\n\n{identity}\n{body}".encode("utf-8")
     return documents
+
+
+def is_release_channel(channel):
+    if channel in {"develop", "latest"} or re.fullmatch(r"[0-9a-f]{7,12}", channel):
+        return True
+    version, separator, suffix = channel.partition("-")
+    if not re.fullmatch(r"\d+\.\d+(?:\.\d+)?", version, flags=re.ASCII):
+        return False
+    return not separator or bool(re.fullmatch(r"[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*", suffix))
 
 
 def main():
@@ -306,7 +325,7 @@ def main():
     parser.add_argument("--channel", required=True)
     add_input_arguments(parser)
     args = parser.parse_args()
-    if not re.fullmatch(r"(?:develop|latest|[0-9a-f]{7,12}|[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?)", args.channel):
+    if not is_release_channel(args.channel):
         parser.error("Canal, SHA corto o versión no válidos.")
 
     mapping = load_map()

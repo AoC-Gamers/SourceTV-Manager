@@ -469,6 +469,9 @@ class ExtensionConfig(object):
   def HL2Config(self, project, compiler, name, sdk, context):
     binary = project.Configure(compiler, name, '{0} - {1}'.format(self.tag, sdk.name))
     self.ConfigureForExtension(context, binary.compiler)
+    if builder.options.enable_coverage:
+      binary.compiler.cxxflags += ['--coverage', '-fprofile-abs-path', '-O0']
+      binary.compiler.linkflags += ['--coverage']
     return self.ConfigureForHL2(context, binary, sdk)
 
 Extension = ExtensionConfig()

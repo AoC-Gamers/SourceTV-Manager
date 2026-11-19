@@ -121,6 +121,7 @@ private:
 	void UnhookClient(IClient *client);
 
 private:
+	void ShutdownRecordingHooks();
 	void OnStartRecording_Pre(const char *filename, bool bContinuously);
 	void OnStartRecording_Post(const char *filename, bool bContinuously);
 #if SOURCE_ENGINE == SE_CSGO

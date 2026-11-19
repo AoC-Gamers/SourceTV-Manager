@@ -39,9 +39,12 @@
 #include <memory>
 #include <string>
 
+class HLTVClientWrapper;
+
 class HLTVServerWrapper : public ke::Refcounted<HLTVServerWrapper> {
 public:
 	HLTVServerWrapper(IHLTVServer *hltvserver);
+	~HLTVServerWrapper();
 	bool BeginShutdown();
 	bool IsActive() const { return m_Active; }
 

@@ -1,4 +1,5 @@
 #include "core/recording_hooks.h"
+#include "core/hltvclientwrapper.h"
 #include "core/hltvserverwrapper.h"
 #include "core/hook_context.h"
 #include "hooks/forwards.h"
@@ -43,6 +44,8 @@ HLTVServerWrapper::HLTVServerWrapper(IHLTVServer *server)
 	  m_DemoRecorder(g_HLTVServers.GetDemoRecorderPtr(server))
 {
 }
+
+HLTVServerWrapper::~HLTVServerWrapper() = default;
 
 bool HLTVServerWrapper::BeginShutdown()
 {

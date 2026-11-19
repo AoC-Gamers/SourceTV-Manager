@@ -53,8 +53,6 @@
 #include "igameevents.h"
 #include "inetmessage.h"
 #include "netadr.h"
-#include "core/hltvdirectorwrapper.h"
-#include "core/hltvclientwrapper.h"
 
 class INetMessage;
 class HLTVServerWrapper;

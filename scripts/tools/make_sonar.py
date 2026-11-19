@@ -26,23 +26,27 @@ class SonarError(Exception):
     pass
 
 
+def dotenv_entries(path):
+    if not path.is_file():
+        return
+    for text in path.read_text(encoding="utf-8").splitlines():
+        line = text.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        yield key, value
+
+
 def configuration(root):
     # Read values as data, never source shell commands. Explicit environment wins.
     env = os.environ.copy()
     for name, allowed in ((".env", SETTINGS), (".env.secret", {"SONAR_TOKEN"})):
-        path = root / name
-        if not path.is_file():
-            continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = (part.strip() for part in line.split("=", 1))
+        for key, value in dotenv_entries(root / name):
             if name == ".env" and key == "SONAR_TOKEN":
                 raise SonarError("SONAR_TOKEN debe estar en .env.secret o en el entorno.")
             if key in allowed:
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-                    value = value[1:-1]
                 env.setdefault(key, value)
     return env
 
@@ -68,6 +72,21 @@ def scanner_context(env):
     return base, project, name, wait, timeout
 
 
+def compilation_arguments(entry):
+    args = entry.get("arguments")
+    if args is None:
+        args = shlex.split(entry["command"])
+    if not isinstance(args, list) or not all(isinstance(v, str) for v in args) or "-m32" not in args:
+        raise SonarError("El análisis requiere las órdenes reales de compilación x86 (-m32).")
+    return args
+
+
+def targets_l4d2(args):
+    engine = next((arg.split("=", 1)[1] for arg in args
+                   if arg.startswith("-DSE_LEFT4DEAD2=")), None)
+    return engine is not None and f"-DSOURCE_ENGINE={engine}" in args
+
+
 def compilation_database(root, path):
     path = Path(path)
     if not path.is_absolute():
@@ -86,16 +105,8 @@ def compilation_database(root, path):
         source = (directory / entry["file"]).resolve()
         if not any(source.is_relative_to(folder) for folder in folders):
             continue
-        args = entry.get("arguments")
-        if args is None:
-            args = shlex.split(entry["command"])
-        if not isinstance(args, list) or not all(isinstance(v, str) for v in args) or "-m32" not in args:
-            raise SonarError("El análisis requiere las órdenes reales de compilación x86 (-m32).")
-        # The two Support SDKs compile the same translation units. Use the
-        # actual L4D2 command for each file for a consistent analysis context.
-        engine = next((arg.split("=", 1)[1] for arg in args
-                       if arg.startswith("-DSE_LEFT4DEAD2=")), None)
-        if engine is None or f"-DSOURCE_ENGINE={engine}" not in args:
+        args = compilation_arguments(entry)
+        if not targets_l4d2(args):
             continue
         if source in selected:
             raise SonarError(f"Hay dos órdenes L4D2 para {source.name}.")
@@ -133,75 +144,91 @@ def compiler_query(entry):
     return [*command, "-dM", "-E", "-v", "-x", language, "-"]
 
 
-def compiler_identity(entries, root, env):
-    # Compilation databases omit predefined compiler macros. AMTL checks the
-    # real compiler identity/version; querying it preserves that branch instead
-    # of suppressing #error or inventing a compiler version for the analyzer.
-    cache = {}
-    contexts = []
-    names = {"__GNUC__", "__GNUC_MINOR__", "__GNUC_PATCHLEVEL__", "__GNUG__",
-             "__clang__", "__clang_major__", "__clang_minor__", "__clang_patchlevel__",
-             "__linux__", "__linux", "linux", "__unix__", "__unix", "unix",
-             "__i386__", "__i386", "i386", "__ILP32__", "_ILP32", "__ELF__",
-             "__SIZEOF_POINTER__", "__SIZEOF_LONG__", "__SIZEOF_SIZE_T__"}
-    for entry in entries:
-        args = entry["arguments"]
-        language = "c" if Path(entry["file"]).suffix == ".c" else "c++"
-        command = compiler_query(entry)
-        key = (entry["directory"], *command)
-        if key not in cache:
-            result = subprocess.run(command, input="", cwd=entry["directory"], env={**env, "LC_ALL": "C"},
-                                    capture_output=True, text=True)
-            if result.returncode:
-                raise SonarError("No se pudieron consultar las macros del compilador real.")
-            macros = {name: value for name, value in re.findall(r"^#define (\w+) (\d+)$", result.stdout, re.M)
-                      if name in names}
-            if "__GNUC__" not in macros and "__clang__" not in macros:
-                raise SonarError("El análisis Linux requiere identidad GCC/Clang verificable.")
-            includes = []
+COMPILER_IDENTITY_MACROS = {
+    "__GNUC__", "__GNUC_MINOR__", "__GNUC_PATCHLEVEL__", "__GNUG__",
+    "__clang__", "__clang_major__", "__clang_minor__", "__clang_patchlevel__",
+    "__linux__", "__linux", "linux", "__unix__", "__unix", "unix",
+    "__i386__", "__i386", "i386", "__ILP32__", "_ILP32", "__ELF__",
+    "__SIZEOF_POINTER__", "__SIZEOF_LONG__", "__SIZEOF_SIZE_T__",
+}
+
+
+def implicit_include_paths(output, directory):
+    includes = []
+    searching = False
+    for text in output.splitlines():
+        line = text.strip()
+        if line == "#include <...> search starts here:":
+            searching = True
+        elif line == "End of search list.":
             searching = False
-            for line in result.stderr.splitlines():
-                if line.strip() == "#include <...> search starts here:":
-                    searching = True
-                elif line.strip() == "End of search list.":
-                    searching = False
-                elif searching:
-                    directory = (Path(entry["directory"]) / line.strip()).resolve()
-                    if directory.is_dir():
-                        includes.append(str(directory))
-            if not includes:
-                raise SonarError("No se pudieron consultar los includes implícitos del compilador.")
-            predefined = dict(re.findall(r"^#define (\S+) (.*)$", result.stdout, re.M))
-            cache[key] = (macros, predefined, includes)
-        macros, predefined, includes = cache[key]
-        if language == "c++":
-            contexts.append((predefined, includes))
-        for name, value in macros.items():
-            if not any(a == "-D" + name or a.startswith("-D" + name + "=") or a == "-U" + name for a in args):
-                args.append(f"-D{name}={value}")
-    # Headers are indexed independently by CXX and have no translation-unit
-    # command. Supply common C++ defaults without discarding per-file flags.
+        elif searching:
+            path = (Path(directory) / line).resolve()
+            if path.is_dir():
+                includes.append(str(path))
+    if not includes:
+        raise SonarError("No se pudieron consultar los includes implícitos del compilador.")
+    return includes
+
+
+def query_compiler_defaults(command, directory, env):
+    result = subprocess.run(command, input="", cwd=directory, env={**env, "LC_ALL": "C"},
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise SonarError("No se pudieron consultar las macros del compilador real.")
+    macros = {name: value for name, value in re.findall(r"^#define (\w+) (\d+)$", result.stdout, re.M)
+              if name in COMPILER_IDENTITY_MACROS}
+    if "__GNUC__" not in macros and "__clang__" not in macros:
+        raise SonarError("El análisis Linux requiere identidad GCC/Clang verificable.")
+    predefined = dict(re.findall(r"^#define (\S+) (.*)$", result.stdout, re.M))
+    return macros, predefined, implicit_include_paths(result.stderr, directory)
+
+
+def explicit_include_paths(entry):
+    args = iter(entry["arguments"])
+    for arg in args:
+        for option in ("-isystem", "-iquote", "-idirafter", "-I"):
+            if arg.startswith(option):
+                value = next(args, "") if arg == option else arg[len(option):]
+                if value:
+                    yield str((Path(entry["directory"]) / value).resolve())
+                break
+
+
+def header_context(entries, contexts):
     if not contexts:
         raise SonarError("La base debe incluir unidades C++ de la extensión.")
     common = dict(contexts[0][0])
     for macros, _ in contexts[1:]:
-        common = {k: v for k, v in common.items() if macros.get(k) == v}
-    # The compiler has already applied ordered -D/-U flags. Replaying them as
-    # an unordered set would lose redefinitions and undefine-then-define order.
-    directories = []
-    for entry in entries:
-        args = iter(entry["arguments"])
-        for arg in args:
-            for option in ("-isystem", "-iquote", "-idirafter", "-I"):
-                if arg == option or arg.startswith(option) and len(arg) > len(option):
-                    value = next(args, "") if arg == option else arg[len(option):]
-                    if value:
-                        directories.append(str((Path(entry["directory"]) / value).resolve()))
-                    break
+        common = {key: value for key, value in common.items() if macros.get(key) == value}
+    directories = [directory for entry in entries for directory in explicit_include_paths(entry)]
     directories += [directory for _, includes in contexts for directory in includes]
-    global_context = {"file": "__global__", "defines": common,
-                      "includes": list(dict.fromkeys(directories))}
-    return entries, global_context
+    return {"file": "__global__", "defines": common, "includes": list(dict.fromkeys(directories))}
+
+
+def add_compiler_identity(args, macros):
+    for name, value in macros.items():
+        define, undefine = f"-D{name}", f"-U{name}"
+        if not any(arg in {define, undefine} or arg.startswith(define + "=") for arg in args):
+            args.append(f"{define}={value}")
+
+
+def compiler_identity(entries, env):
+    # Query the real compiler so AMTL sees the original identity and ordered -D/-U flags.
+    cache = {}
+    contexts = []
+    for entry in entries:
+        command = compiler_query(entry)
+        directory = entry["directory"]
+        key = (directory, *command)
+        if key not in cache:
+            cache[key] = query_compiler_defaults(command, directory, env)
+        macros, predefined, includes = cache[key]
+        if Path(entry["file"]).suffix != ".c":
+            contexts.append((predefined, includes))
+        add_compiler_identity(entry["arguments"], macros)
+    # Headers are also indexed independently from their translation units.
+    return entries, header_context(entries, contexts)
 
 
 def redact(text, token):
@@ -247,7 +274,7 @@ def run(action, default_database, root=ROOT):
     coverage_paths()
     entries = compilation_database(root, source_database)
     local_env = {k: v for k, v in env.items() if not k.startswith("SONAR_")}
-    entries, global_context = compiler_identity(entries, root, local_env)
+    entries, global_context = compiler_identity(entries, local_env)
     # Each run gets a private output directory. A failed run cannot reuse old XML.
     parent = root / ".build/sonar"
     parent.mkdir(parents=True, exist_ok=True)

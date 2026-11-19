@@ -32,11 +32,9 @@
 #ifndef _INCLUDE_SOURCEMOD_EXTENSION_HLTVCLIENT_H_
 #define _INCLUDE_SOURCEMOD_EXTENSION_HLTVCLIENT_H_
 
-#include "extension.h"
-#include "amtl/am-string.h"
-#include "amtl/am-vector.h"
-#include "amtl/am-utility.h"
 #include <string>
+
+class IClient;
 
 class HLTVClientWrapper {
 public:

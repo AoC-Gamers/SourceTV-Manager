@@ -78,6 +78,13 @@ pasa al motor. En SRCDS queda por comprobar el rechazo vacío y con `%`, la
 consulta de la instancia dentro de `SourceTV_OnServerStart` y la retirada de
 hooks con Manager y Support en ambos órdenes de carga.
 
+Las natives conservan una única [tabla de registro](../extension/natives/natives.cpp).
+Sus operaciones de [grabación](../extension/natives/recording.cpp),
+[cámara](../extension/natives/camera.cpp) y
+[salida](../extension/natives/output.cpp) se compilan por separado.
+Los [observadores de grabación](../extension/hooks/recording.cpp) reúnen
+la instalación, los callbacks y la retirada para cada plataforma.
+
 Para el diagnóstico de grabación, ejecuta
 `make build-diagnostics SPCOMP=/ruta/a/spcomp SPCOMP_INCLUDE_DIR=/ruta/a/include`
 con un toolchain SourceMod 1.12. El resultado queda en

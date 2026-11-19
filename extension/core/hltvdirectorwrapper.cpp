@@ -1,4 +1,5 @@
 #include "core/hltvdirectorwrapper.h"
+#include "extension.h"
 
 HLTVDirectorWrapper g_HLTVDirectorWrapper;
 

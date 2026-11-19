@@ -1,4 +1,5 @@
 #include "core/hltvclientwrapper.h"
+#include "extension.h"
 
 HLTVClientWrapper::HLTVClientWrapper()
 {

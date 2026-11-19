@@ -14,6 +14,8 @@ builder.options.add_argument('--sm-path', type=str, dest='sm_path', default=None
                        help='Path to SourceMod')
 builder.options.add_argument('--enable-debug', action='store_const', const='1', dest='debug',
                        help='Enable debugging symbols')
+builder.options.add_argument('--enable-coverage', action='store_true',
+                       help='Instrument the Linux extension for local runtime coverage')
 builder.options.add_argument('--enable-optimize', action='store_const', const='1', dest='opt',
                        help='Enable optimization')
 builder.options.add_argument('-s', '--sdks', default='all', dest='sdks',

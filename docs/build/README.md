@@ -53,7 +53,7 @@ coverage.py 7.13.5 disponible en ese intérprete. Usa el mismo `BUILD_DIR`
 al generar el recibo y al analizar. Las mediciones C++ y Python se guardan
 por separado en `.build/coverage/`. El baseline C++ conserva con cero hits
 las líneas ejecutables del build que las pruebas nativas no alcanzaron.
-La prueba Python incluye los subprocesos de las pruebas de paquete.
+La medición Python incluye las pruebas de paquete y de tooling con sus subprocesos.
 
 Para adjuntar las mediciones al análisis explícito, configura
 `SONAR_COVERAGE_RECEIPT` con la ruta de `receipt.json`. El backend comprueba
@@ -64,6 +64,27 @@ nativas. La cobertura añade sus propios flags a ese perfil. Si usas un GCC
 distinto, indica el gcov correspondiente mediante `GCOV`.
 `make test-coverage-tooling` verifica el recibo y la importación simulada.
 El análisis y la cobertura quedan fuera de CI y del ZIP.
+
+Para medir una sesión SRCDS Linux x86, genera un build separado con GCC.
+
+```bash
+make build-coverage-linux
+```
+
+Usa los binarios y el gamedata de `.build/runtime-coverage/package/addons/`
+en una instancia de pruebas aislada y ejecuta los escenarios de
+[aceptación](../testing/README.md). Cierra SRCDS normalmente para guardar los
+contadores `.gcda`. Si fijaste `GCOV_PREFIX`, devuelve los contadores a la
+ubicación de sus correspondientes `.gcno` en el build que los generó.
+
+```bash
+make test-coverage COVERAGE_RUNTIME_BUILD="$PWD/.build/runtime-coverage"
+```
+
+En esta última orden, `BUILD_DIR` identifica el build Linux normal.
+El recibo vincula los contadores al build instrumentado y verifica que las
+fuentes, dependencias y órdenes coincidan con el build normal salvo los flags
+de cobertura. El empaquetador rechaza el build instrumentado.
 
 ## Sonar local
 

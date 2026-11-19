@@ -67,6 +67,23 @@ class ArtifactContractTest(unittest.TestCase):
                     contract_tool.products(build, "linux", inputs, MAP)
                 verify.assert_called_once_with(inputs)
 
+    def test_release_channel_preserves_ascii_version_grammar(self):
+        for channel in ("develop", "latest", "abc1234", "1.2", "1.2.3-rc.1-hotfix"):
+            with self.subTest(channel=channel):
+                self.assertTrue(contract_tool.is_release_channel(channel))
+        for channel in ("", "abc123", "1.2.3.4", "1.2-", "1.2-rc..1", "１２.3", "../develop"):
+            with self.subTest(channel=channel):
+                self.assertFalse(contract_tool.is_release_channel(channel))
+
+    def test_runtime_coverage_build_cannot_be_packaged(self):
+        with tempfile.TemporaryDirectory() as work:
+            build = Path(work)
+            with (patch.object(contract_tool, "source_digest", return_value="current"),
+                  patch.object(contract_tool, "binary_hashes", return_value={})):
+                contract_tool.record_build(build, "linux", "current", {}, MAP, coverage=True)
+                with self.assertRaisesRegex(ValueError, "instrumentado para cobertura"):
+                    contract_tool.products(build, "linux", None, MAP)
+
     def test_map_rejects_unknown_keys_at_every_level(self):
         for section in ((), ("build",), ("artifact",), ("artifact", "documentation")):
             with self.subTest(section=section):
