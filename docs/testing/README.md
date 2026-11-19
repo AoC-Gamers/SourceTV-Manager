@@ -1,22 +1,27 @@
-# Aceptación de SourceTV en SRCDS
+# Validación de SourceTV-Manager en SRCDS
 
-Prueba cada plataforma en una instalación aislada con Metamod y SourceMod.
-Registra la versión de L4D2, la plataforma, la versión de SourceMod y las
-huellas de los módulos del juego y de los ZIP instalados. Conserva logs y demos
-de pruebas fuera del paquete.
+## Antes de probar
 
-| Escenario | Comprobación |
+Usa un SRCDS de pruebas con las [dependencias de instalación](../installation/README.md).
+Registra SO, versión y build de L4D2, versiones de Metamod:Source y SourceMod, revisión
+disponible y SHA-256 de los ZIP y binarios cargados. Conserva logs, transcripciones y demos
+fuera del instalador.
+
+Para revisar una demo, copia el archivo `.dem` del servidor al directorio `left4dead2/` del
+cliente y ejecuta `playdemo <nombre>` en su consola. Verifica la reproducción hasta el cierre.
+
+## Escenarios
+
+| Escenario | Resultado esperado |
 | --- | --- |
-| Primer mapa | Con el VDF de Support y `-hltv +tv_enable 1`, verifica el diagnóstico del VSP y que SourceTV emita en ese mapa. Comprueba ambas extensiones con `sm exts list`. |
-| Coexistencia | En una sesión carga Manager antes de Support y en otra Support antes de Manager. Descarga y recarga cada una con la otra presente. Comprueba grabación, conexión de un espectador, mensajes locales y rechazo de pantalla dividida. |
-| Grabación y cambio de mapa | Inicia una demo, toma un snapshot, intenta pararla con un token ajeno y confirma que sigue activa. Detén con el propietario. Cambia de mapa, verifica la nueva instancia y reproduce las demos en un cliente L4D2 compatible. |
-| Cambio de dependencias | En la instancia de pruebas, retira y restablece BinTools y SDKTools. Comprueba disponibilidad, reenganche de hooks y ausencia de accesos al proveedor descargado. |
-| Steam | Repite los escenarios con SteamWorks si forma parte de la instalación. Comprueba inicialización, reinicio y `LogOff`. Cerrar HLTV debe conservar la sesión del servidor principal mientras este siga activo. |
+| Carga | `sm exts list` muestra **SourceTV Manager**. Un plugin consumidor puede llamar a la API con SourceTV activo. |
+| Grabación | El inicio devuelve un token y el snapshot refleja la instancia y la ruta. Prueba un token ajeno y uno revocado. Cierra con el propietario y verifica los forwards y la reproducción. |
+| Ciclo de vida | Descarga el plugin propietario durante una grabación. Comprueba que el token pierde validez, que el snapshot presenta la demo sin propietario y que la demo puede cerrarse usando la API correspondiente. Cambia de mapa y comprueba la nueva instancia. |
+| Espectadores | Conecta un cliente al puerto SourceTV, envíale un mensaje de chat y otro de consola, y verifica ambos en el cliente. Prueba con la traducción en español latinoamericano y comprueba los rechazos con motivo vacío y con un `%` literal. |
+| Convivencia | Carga Manager y Support en ambos órdenes. Descarga y recarga cada extensión mientras la otra sigue activa. Reconecta al espectador y repite los mensajes y la grabación. |
+| Dependencias | En una instancia de pruebas, retira y restablece BinTools y SDKTools. Comprueba el estado de las funciones que dependen de cada proveedor y que no se utilicen después de su retirada. |
 
-En Linux, `make test-coexistence` ejecuta ambos órdenes de carga y descarga
-con SourceHook y un proveedor controlado. Comprueba las llamadas al original,
-las conexiones anidadas, el rechazo y la retirada durante un callback.
-
-Las pruebas con proveedores controlados validan los escenarios del harness.
-Para aceptar la coexistencia completa, registra por separado los escenarios
-ejecutados en SRCDS Linux y Windows y los que queden pendientes.
+En Linux, `make test-coexistence` comprueba con SourceHook ambos órdenes de carga y retirada, el
+rechazo y las conexiones anidadas con un proveedor controlado. Consulta las
+[pruebas automatizadas](../../tests/README.md) para distinguir ese alcance de la validación en
+SRCDS.
